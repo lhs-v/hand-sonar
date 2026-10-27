@@ -98,11 +98,14 @@ fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Un
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (ui.lastDir != null) OutlinedButton(onClick = c::undoLast) { Text("방금 세션 되돌리기") }
-                OutlinedButton(onClick = c::showRecords) { Text("기록") }
                 OutlinedButton(onClick = c::toggleHand, enabled = !ui.busy) { Text("추적: ${ui.trackedHand.label}") }
                 TextButton(onClick = c::cycleRotation) { Text("회전 보정 ${ui.extraRotation}°") }
                 if (!ui.permissionsGranted) Button(onClick = onRequestPermission) { Text("권한 요청") }
+            }
+            // 세션 버튼은 줄을 따로 둔다: 되돌리기까지 한 줄이면 오른쪽 열(약 459 dp)을 넘어 끝 버튼이 접힌다.
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (ui.lastDir != null) OutlinedButton(onClick = c::undoLast) { Text("방금 세션 되돌리기") }
+                OutlinedButton(onClick = c::showRecords) { Text("기록") }
             }
             Text(
                 "미디어 볼륨 ${ui.mediaVolume}/${ui.mediaMax} · 저장 공간 %.1f GB".format(ui.freeGb),
