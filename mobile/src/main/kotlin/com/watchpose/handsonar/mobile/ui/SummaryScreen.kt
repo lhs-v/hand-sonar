@@ -25,6 +25,11 @@ fun SummaryScreen(ui: UiState, c: SessionController) {
             Text(s.dir.name, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             StatusRow("길이", mmss(s.durationSec.toInt()), Level.OK)
             StatusRow("손 인식", percent(s.handRatio), if (s.handRatio >= SessionChecks.MIN_HAND_RATIO) Level.OK else Level.WARN)
+            StatusRow(
+                "초당 프레임",
+                s.fps?.let { "%.1f".format(it) + if (s.delegate.isNotEmpty()) " · ${s.delegate}" else "" } ?: "—",
+                if ((s.fps ?: 0.0) >= SessionChecks.MIN_FPS) Level.OK else Level.WARN,
+            )
             StatusRow("워치 처프", percent(s.watchRatio), if (s.watchRatio >= SessionChecks.MIN_WATCH_RATIO) Level.OK else Level.WARN)
             StatusRow("시작 표지음", if (s.startMarker) "찾음" else "못 찾음", if (s.startMarker) Level.OK else Level.BAD)
             StatusRow("끝 표지음", if (s.endMarker) "찾음" else "못 찾음", if (s.endMarker) Level.OK else Level.BAD)

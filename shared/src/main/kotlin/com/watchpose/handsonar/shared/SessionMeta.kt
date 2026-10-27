@@ -1,6 +1,11 @@
 package com.watchpose.handsonar.shared
 
-/** meta.json의 camera. [display]는 "inner" | "cover", [timeBase]는 "realtime" | "arrival"(프레임 도착 시각으로 대신함, 근사). */
+/**
+ * meta.json의 camera. [display]는 "inner" | "cover", [timeBase]는 "realtime" | "arrival"(프레임 도착 시각으로 대신함, 근사).
+ * [fps]는 카메라에 건 목표값(30)이고, [measuredFps]는 세션 중 실제 평균(landmarks.csv 줄 수 ÷ 첫·마지막 frameNs 간격,
+ * 시작 때 쓴 meta와 프레임 2개 미만이면 null)이다. [delegate]는 손 추적이 쓰던 계산 장치("GPU" | "CPU", 모르면 null)로,
+ * 끝에서 다시 쓴 meta에는 세션이 끝날 때의 값이 들어간다.
+ */
 data class CameraMeta(
     val id: String,
     val display: String,
@@ -10,6 +15,8 @@ data class CameraMeta(
     val timeBase: String,
     val mirrored: Boolean,
     val rotation: Int,
+    val delegate: String? = null,
+    val measuredFps: Double? = null,
 )
 
 /** 표지음 하나의 기록. [micFrame]은 phone_audio.wav 안에서 찾은 시작 샘플, [elapsedNs]는 그 샘플의 폰 시각. 못 찾으면 found=false. */
@@ -63,6 +70,7 @@ data class SessionMeta(
                 linkedMapOf<String, Any?>(
                     "id" to it.id, "display" to it.display, "width" to it.width, "height" to it.height,
                     "fps" to it.fps, "timeBase" to it.timeBase, "mirrored" to it.mirrored, "rotation" to it.rotation,
+                    "delegate" to it.delegate, "measuredFps" to it.measuredFps,
                 )
             },
             "hand" to hand,

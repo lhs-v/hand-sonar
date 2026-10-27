@@ -65,7 +65,7 @@ val downloadHandModel = tasks.register("downloadHandModel") {
     onlyIf { !target.exists() }
     doLast {
         part.parentFile.mkdirs()
-        URI(url).toURL().openStream().use { input -> part.outputStream().use { input.copyTo(it) } }
+        URI(url).toURL().openConnection().apply { connectTimeout = 30_000; readTimeout = 60_000 }.getInputStream().use { input -> part.outputStream().use { input.copyTo(it) } }
         val sha = MessageDigest.getInstance("SHA-256").digest(part.readBytes()).joinToString("") { "%02x".format(it) }
         if (sha != expected) throw GradleException("hand_landmarker.task의 SHA-256이 다릅니다: $sha")
         target.parentFile.mkdirs()

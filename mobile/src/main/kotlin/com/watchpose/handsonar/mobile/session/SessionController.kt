@@ -61,6 +61,8 @@ data class SummaryInfo(
     val endMarker: Boolean,
     val flags: List<String>,
     val videoOk: Boolean,
+    val fps: Double?,
+    val delegate: String,
     val undone: Boolean,
 )
 
@@ -488,6 +490,7 @@ class SessionController(private val app: Application) {
                     // 소리를 먼저 닫는다: 영상 마무리는 길게 막힐 수 있어(최대 약 12 s) 그동안 WAV가 열린 채 남지 않게.
                     val audio = mic.endSession()
                     val videoOk = rec?.close() ?: false
+                    val fps = rec?.measuredFps
                     val frameCount = rec?.frames ?: 0L
                     val handRatio = if (frameCount > 0) (rec?.handFrames ?: 0L).toDouble() / frameCount else 0.0
                     val heard = chirps.count { it.second != ChirpHeard.NONE }
@@ -516,7 +519,7 @@ class SessionController(private val app: Application) {
                         store.writeText(dir, SessionStore.AUDIO_JSON, PhoneAudioJson.write(audio.source, audio.clockSource, audio.clock, audio.frames))
                     }
                     val meta = meta0.copy(
-                        camera = cameraMeta() ?: meta0.camera,
+                        camera = cameraMeta(fps) ?: meta0.camera,
                         endWallMs = endWallMs,
                         endNs = endNs,
                         status = if (cancelled) SessionMeta.STATUS_TRASH else SessionMeta.STATUS_KEPT,
@@ -537,6 +540,8 @@ class SessionController(private val app: Application) {
                         flags = flags,
                         // 폰 녹음이 없거나(마이크 오류 뒤 다시 열림) 오류면 "오류"로 보인다
                         videoOk = videoOk && frameCount > 0 && audio != null && audio.error == null,
+                        fps = fps,
+                        delegate = camera.delegate,
                         undone = false,
                     )
                 }
@@ -604,9 +609,12 @@ class SessionController(private val app: Application) {
         return gaps
     }
 
-    private fun cameraMeta(): CameraMeta? {
+    private fun cameraMeta(measuredFps: Double? = null): CameraMeta? {
         val c = camera.chosen ?: return null
-        return CameraMeta(c.id, c.display, camera.frameWidth, camera.frameHeight, CameraPipeline.FPS, camera.timeBase, mirrored = true, rotation = camera.rotation)
+        return CameraMeta(
+            c.id, c.display, camera.frameWidth, camera.frameHeight, CameraPipeline.FPS, camera.timeBase,
+            mirrored = true, rotation = camera.rotation, delegate = camera.delegate.ifEmpty { null }, measuredFps = measuredFps,
+        )
     }
 
     private fun cameraLabel(): String {

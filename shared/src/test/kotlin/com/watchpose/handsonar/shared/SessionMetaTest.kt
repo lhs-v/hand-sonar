@@ -33,13 +33,24 @@ class SessionMetaTest {
     fun startOfSessionHasNullEndAndStats() {
         val json = meta(stats = null, endWallMs = null).toJson()
         assertTrue(json.startsWith("{\"format\":1,\"app\":\"0.1.0\",\"device\":\"samsung SM-F971N\",\"android\":\"17 (API 37)\",\"camera\":{\"id\":\"3\",\"display\":\"inner\""), json)
-        assertTrue(json.contains("\"rotation\":270},\"hand\":\"left\",\"start\""), json)
+        assertTrue(json.contains("\"measuredFps\":null},\"hand\":\"left\",\"start\""), json) // camera가 measuredFps로 끝나고 hand·start가 이어짐
         assertTrue(json.contains("\"start\":{\"wallMs\":1000,\"elapsedNs\":2000},\"end\":null"), json)
         assertTrue(json.contains("\"stats\":null"), json)
         assertTrue(json.contains("\"status\":\"kept\",\"flags\":[\"suspect-hand\"],\"memo\":\"\""), json)
         assertTrue(json.contains("\"version\":\"watchhand-1\",\"seed\":9,\"freeMotionSec\":0,\"promptMs\":2000"), json)
         assertTrue(json.contains("\"segments\":[[" + plan.segments[0].joinToString(",") { it.classId.toString() } + "]"), json)
         assertTrue(json.endsWith("\"audio\":{\"file\":\"phone_audio.wav\",\"source\":\"UNPROCESSED\"},\"cancelled\":false}"), json)
+    }
+
+    @Test
+    fun cameraEndsWithDelegateAndMeasuredFps() {
+        val base = meta(stats = null, endWallMs = null)
+        // 안 준 경우(기존 시험의 CameraMeta): 두 칸이 null로 camera 맨 끝에 적힌다
+        val unset = base.toJson()
+        assertTrue(unset.contains("\"rotation\":270,\"delegate\":null,\"measuredFps\":null}"), unset)
+        // 준 경우
+        val given = base.copy(camera = base.camera?.copy(delegate = "GPU", measuredFps = 29.5)).toJson()
+        assertTrue(given.contains("\"rotation\":270,\"delegate\":\"GPU\",\"measuredFps\":29.5}"), given)
     }
 
     @Test

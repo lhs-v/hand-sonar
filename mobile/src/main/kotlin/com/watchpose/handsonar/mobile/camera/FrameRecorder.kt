@@ -2,6 +2,7 @@ package com.watchpose.handsonar.mobile.camera
 
 import android.graphics.Bitmap
 import com.watchpose.handsonar.shared.LandmarkCsv
+import com.watchpose.handsonar.shared.SessionChecks
 import java.io.File
 
 /**
@@ -15,6 +16,7 @@ class FrameRecorder(dir: File) {
     private val videoFile = File(dir, VIDEO_FILE)
     private var encoder: VideoEncoder? = null
     private var firstNs = -1L
+    private var lastNs = -1L
     private var closed = false
 
     @Volatile var frames: Long = 0
@@ -31,6 +33,9 @@ class FrameRecorder(dir: File) {
 
     /** mp4에 실제로 쓴 프레임 수(정상이면 [frames]와 같다). */
     val videoFrames: Long get() = encoder?.written ?: 0
+
+    /** 세션 중 실제 평균 초당 프레임([SessionChecks.measuredFps]). */
+    val measuredFps: Double? get() = synchronized(lock) { SessionChecks.measuredFps(frames, firstNs, lastNs) }
 
     init {
         csv.write(LandmarkCsv.HEADER)
@@ -60,6 +65,7 @@ class FrameRecorder(dir: File) {
             frames++
             if (hand.image != null) handFrames++
             if (firstNs < 0) firstNs = hand.frameNs
+            lastNs = hand.frameNs
             enc.submit(pixels, (hand.frameNs - firstNs) / 1_000)
         }
     }
