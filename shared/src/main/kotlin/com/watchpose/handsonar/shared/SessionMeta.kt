@@ -2,7 +2,7 @@ package com.watchpose.handsonar.shared
 
 /**
  * meta.json의 camera. [display]는 "inner" | "cover", [timeBase]는 "realtime" | "arrival"(프레임 도착 시각으로 대신함, 근사).
- * [fps]는 카메라에 건 목표값(30)이고, [measuredFps]는 세션 중 실제 평균(landmarks.csv 줄 수 ÷ 첫·마지막 frameNs 간격,
+ * [fps]는 카메라에 건 목표값(30)이고, [measuredFps]는 세션 중 실제 평균((landmarks.csv 줄 수 − 1) ÷ 첫·마지막 frameNs 간격,
  * 시작 때 쓴 meta와 프레임 2개 미만이면 null)이다. [delegate]는 손 추적이 쓰던 계산 장치("GPU" | "CPU", 모르면 null)로,
  * 끝에서 다시 쓴 meta에는 세션이 끝날 때의 값이 들어간다.
  */
