@@ -1,0 +1,26 @@
+# Gradle·Android 빌드 결과
+.gradle/
+.kotlin/
+build/
+.cxx/
+captures/
+*.apk
+*.aab
+
+# 기기마다 다른 설정(SDK 경로)
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# 파이썬
+__pycache__/
+*.pyc
+
+# MediaPipe 손 모델: 빌드할 때 내려받는다(mobile/build.gradle.kts)
+mobile/src/main/assets/hand_landmarker.task
+
+# 수집 데이터는 넣지 않는다(얼굴이 찍힌 영상 포함)
+*.wav
+*.mp4

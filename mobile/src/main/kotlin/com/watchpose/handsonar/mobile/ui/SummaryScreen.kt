@@ -1,0 +1,47 @@
+package com.watchpose.handsonar.mobile.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.watchpose.handsonar.mobile.session.SessionController
+import com.watchpose.handsonar.mobile.session.UiState
+import com.watchpose.handsonar.shared.SessionChecks
+
+/** 세션 직후 화면(설계 §6.3): 누르지 않아도 이미 저장됐다. 결과 요약과 "방금 세션 되돌리기"(다음 세션 시작 전까지). */
+@Composable
+fun SummaryScreen(ui: UiState, c: SessionController) {
+    val s = ui.summary ?: return
+    Row(Modifier.fillMaxSize().padding(24.dp), horizontalArrangement = Arrangement.spacedBy(32.dp)) {
+        Column(Modifier.weight(1.2f), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(if (s.flags.isEmpty()) "세션 저장됨" else "세션 저장됨 · 확인 필요", style = MaterialTheme.typography.displaySmall)
+            Text(s.dir.name, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            StatusRow("길이", mmss(s.durationSec.toInt()), Level.OK)
+            StatusRow("손 인식", percent(s.handRatio), if (s.handRatio >= SessionChecks.MIN_HAND_RATIO) Level.OK else Level.WARN)
+            StatusRow("워치 처프", percent(s.watchRatio), if (s.watchRatio >= SessionChecks.MIN_WATCH_RATIO) Level.OK else Level.WARN)
+            StatusRow("시작 표지음", if (s.startMarker) "찾음" else "못 찾음", if (s.startMarker) Level.OK else Level.BAD)
+            StatusRow("끝 표지음", if (s.endMarker) "찾음" else "못 찾음", if (s.endMarker) Level.OK else Level.BAD)
+            StatusRow("영상·소리", if (s.videoOk) "저장됨" else "오류", if (s.videoOk) Level.OK else Level.BAD)
+            if (s.undone) WarningText("휴지통으로 보냈습니다. 기록 화면에서 되살릴 수 있습니다")
+            ui.error?.let { WarningText(it) }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            BigButton("다음 세션 준비", c::nextSession, Modifier.fillMaxWidth())
+            BigButton(
+                "방금 세션 되돌리기",
+                c::undoLast,
+                Modifier.fillMaxWidth(),
+                enabled = ui.lastDir != null && !s.undone,
+                kind = ButtonKind.OUTLINED,
+            )
+            BigButton("기록 보기", c::showRecords, Modifier.fillMaxWidth(), kind = ButtonKind.OUTLINED)
+        }
+    }
+}
