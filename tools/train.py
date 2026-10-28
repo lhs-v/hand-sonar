@@ -1,7 +1,7 @@
 """FastViT-T12로 에코 창에서 손 관절 20점을 회귀하고 평가한다(손 소나 계획 4, 학습 설계 §4·§5).
 
-    python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 200]
-                             [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--save-x] [세션 …]
+    python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 100]
+                             [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--save-x] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
   report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다. dataset.npz는 기본으로 창 x 없이 row·목표·라벨·입력 지문만 쓴다(--save-x면 창도).
@@ -9,7 +9,8 @@
 - 손실: MSE(60값) + 0.1 × 속도 손실. 속도 손실은 묶음 안 이웃 프레임의 예측 차분과 정답 차분의 MSE다(예측 움직임 자체는 벌하지
   않는다 — 평균 쏠림을 키우지 않게). 미니배치는 연속 프레임 32개 묶음 여럿(모두 256프레임 안팎)이다. 덩어리(세션이 같고 이웃 프레임
   간격이 0.2 s 안)마다 묶음 시작을 epoch마다 무작위로 밀고, 묶음 순서를 섞는다.
-- 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs.
+- 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs
+  (100)와 벽시계 상한 --max-minutes(20분, 그 epoch 뒤 멈춤)를 둔다. 학습·검증 손실이 nan·inf면 이유를 적고 끝 코드 1로 멈춘다.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
 - 나누기(--mode, 없으면 세션이 둘 이상이면 session, 하나면 blocks. 규칙은 dataset 머리말):
   session = dataset.session_split(세션 단위, 설계 §4): 시험 = 워치를 다시 찬 세션(meta rewear), 없으면 시각 순 마지막 세션(들). 검증 =
@@ -40,6 +41,7 @@
   시간표 띠(동작 종류와 나누기 역할). 영상 프레임이나 사람 모습은 넣지 않는다.
 """
 import argparse
+import math
 import os
 import sys
 import time
@@ -61,7 +63,8 @@ CHUNK = 32  # 연속 프레임 묶음
 CHUNK_GAP_SEC = 0.2  # 이웃 프레임 간격이 이보다 길면 덩어리를 끊는다(15–30 fps 카메라 간격 33–67 ms의 3배 넘게)
 VELOCITY_WEIGHT = 0.1
 PATIENCE = 9
-EPOCHS = 200  # 최대 epoch(설계에 없음. 조기 종료가 먼저 멈춘다)
+EPOCHS = 100  # 최대 epoch(설계에 없음). 이 세션 실행은 조기 종료가 19–56 epoch에서 먼저 멈췄다. 약 10세션(36k프레임)이면 epoch당 7–11 s(검토 합성 측정)라 100 epoch가 12–18분으로 계획의 "실행 하나 20분 안쪽"에 든다(200이면 25–35분)
+MAX_MINUTES = 20.0  # 벽시계 상한(계획의 실행 하나 20분): 넘으면 그 epoch 뒤 멈추고 가장 좋던 가중치로 되돌린다. 이때는 같은 명령도 같은 숫자를 보장하지 않아 metrics.json stoppedBy "time"으로 남긴다
 EVAL_BLOCK = 512
 ASL5 = 10  # prompts.csv classId: 숫자 5(편 손)
 FLOOR_MIN_FRAMES = 5  # 잡음 바닥: 프레임이 이보다 적은 유지 구간은 뺀다
@@ -142,13 +145,15 @@ def eval_loss(model, x, y, segs):
     return float(loss_fn(pred, y[torch.as_tensor(idx, device=x.device)], torch.as_tensor(pairs_of(segs), device=x.device)))
 
 
-def fit(x, y, train_segs, val_segs, epochs, seed, log=print):
-    """(가장 좋던 가중치의 모델, 기록, 가장 좋던 epoch). x (N, 2, 96, 60)·y (N, 60)는 같은 장치의 텐서."""
+def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES):
+    """(가장 좋던 가중치의 모델, 기록, 가장 좋던 epoch, 멈춘 까닭 "patience" | "epochs" | "time"). x (N, 2, 96, 60)·y (N, 60)는 같은 장치의
+    텐서. 학습·검증 손실이 유한하지 않으면(nan·inf) 그 자리에서 이유를 담은 FloatingPointError로 멈춘다."""
     torch.manual_seed(seed)
     model = make_model().to(x.device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     rng = np.random.default_rng(seed)
-    best, best_epoch, best_state, history = float("inf"), 0, None, []
+    best, best_epoch, best_state, history, stopped = float("inf"), 0, None, [], "epochs"
+    start = time.time()
     for epoch in range(1, epochs + 1):
         model.train()
         total, count = 0.0, 0
@@ -158,9 +163,14 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print):
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
-            total += loss.item() * len(idx)
+            value = loss.item()
+            if not math.isfinite(value):
+                raise FloatingPointError(f"epoch {epoch}: 학습 손실이 유한하지 않음({value}) — 창·정답에 nan·inf가 있거나 학습이 발산했다")
+            total += value * len(idx)
             count += len(idx)
         val = eval_loss(model, x, y, val_segs)
+        if not math.isfinite(val):
+            raise FloatingPointError(f"epoch {epoch}: 검증 손실이 유한하지 않음({val}) — 검증 창·정답에 nan·inf가 있거나 학습이 발산했다")
         history.append({"epoch": epoch, "train": total / count, "val": val})
         if val < best:
             best, best_epoch = val, epoch
@@ -169,9 +179,14 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print):
             log(f"  epoch {epoch}: 학습 손실 {total / count:.5f}, 검증 손실 {val:.5f}(최고 epoch {best_epoch})")
         if epoch - best_epoch >= PATIENCE:
             log(f"  epoch {epoch}: 검증 손실이 {PATIENCE} epoch 동안 나아지지 않아 멈춤(최고 epoch {best_epoch}, {best:.5f})")
+            stopped = "patience"
+            break
+        if epoch < epochs and time.time() - start >= max_minutes * 60:
+            log(f"  epoch {epoch}: 벽시계 상한 {max_minutes:g}분이 지나 멈춤(최고 epoch {best_epoch}, {best:.5f}) — 이때는 같은 명령도 같은 숫자를 보장하지 않는다")
+            stopped = "time"
             break
     model.load_state_dict(best_state)
-    return model, history, best_epoch
+    return model, history, best_epoch, stopped
 
 
 def kind_mix(ds, parts):
@@ -520,6 +535,7 @@ def main():
     parser.add_argument("--data", default=hs_io.DEFAULT_DATA)
     parser.add_argument("--out", help="학습 결과를 둘 폴더(없으면 <data>/processed/training)")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="최대 epoch")
+    parser.add_argument("--max-minutes", type=float, default=MAX_MINUTES, help="학습 벽시계 상한(분). 넘으면 그 epoch 뒤 멈춘다")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offset", type=int, default=0, help="blocks 모드: 고정 무늬(블록 번호 mod 20)를 블록 단위로 돌리는 칸 수")
     parser.add_argument("--test", action="append", metavar="세션", help="session 모드: 시험 세션(여러 번 줄 수 있음. 없으면 다시 찬 세션·마지막 세션)")
@@ -558,8 +574,12 @@ def main():
     x = torch.as_tensor(ds["x"], device=device)
     y = torch.as_tensor(ds["y"], device=device)
     start = time.time()
-    model, history, best_epoch = fit(x, y, segments(ds["frame_ns"], ds["session"], train), segments(ds["frame_ns"], ds["session"], val),
-                                     args.epochs, args.seed)
+    try:
+        model, history, best_epoch, stopped = fit(x, y, segments(ds["frame_ns"], ds["session"], train), segments(ds["frame_ns"], ds["session"], val),
+                                                  args.epochs, args.seed, max_minutes=args.max_minutes)
+    except FloatingPointError as e:
+        print(f"학습을 멈춤: {e}")
+        return 1
     seconds = time.time() - start
     pred = predict(model, x, np.arange(n))
     m = instruments(ds, pred, train, test)
@@ -569,7 +589,8 @@ def main():
                          for k, v in (("train", train), ("val", val), ("test", test))}
     m.update({"format": 1, "run": run, "mode": mode, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
               "frames": {"train": int(len(train)), "val": int(len(val)), "test": int(len(test))}, "seed": args.seed,
-              "epochs": len(history), "maxEpochs": args.epochs, "bestEpoch": best_epoch, "trainSeconds": seconds,
+              "epochs": len(history), "maxEpochs": args.epochs, "maxMinutes": args.max_minutes, "stoppedBy": stopped, "bestEpoch": best_epoch,
+              "trainSeconds": seconds,
               "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history, "mix": mix, "split": split})
     torch.save({"arch": ARCH, "in_chans": 2, "num_classes": 60, "bins": [dataset.BINS.start, dataset.BINS.stop], "window": dataset.WINDOW,
                 "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "state_dict": model.state_dict()},
@@ -579,7 +600,8 @@ def main():
     which = ", ".join(names) if len(names) <= 3 else f"{len(names)}개({names[0]} … {names[-1]})"
     pieces, piece_labels = figure_pieces(ds, test, block)
     figure(os.path.join(folder, "report.png"), ds, pred, parts, m, f"{run}: {what} — 세션 {which}", pieces, piece_labels)
-    print("\n".join([f"{run}: {len(history)} epoch, {seconds / 60:.1f}분, 최고 epoch {best_epoch}"] + report(m)))
+    why = {"patience": f"검증 손실이 {PATIENCE} epoch 동안 나아지지 않음", "epochs": f"최대 {args.epochs} epoch", "time": f"벽시계 상한 {args.max_minutes:g}분"}[stopped]
+    print("\n".join([f"{run}: {len(history)} epoch({why}), {seconds / 60:.1f}분, 최고 epoch {best_epoch}"] + report(m)))
     print(f"결과: {folder}")
     return 0
 

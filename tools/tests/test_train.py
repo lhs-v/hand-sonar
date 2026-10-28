@@ -43,6 +43,20 @@ class VelocityLossTest(unittest.TestCase):
             np.testing.assert_array_equal(np.diff(t[idx])[pair], 50_000_000)  # 이웃 쌍은 늘 바로 다음 프레임
 
 
+class FitTest(unittest.TestCase):
+    def test_non_finite_loss_stops_with_a_reason(self):
+        x = torch.full((8, 2, 96, 60), float("nan"))  # 첫 epoch부터 손실이 nan
+        segs = [np.arange(8)]
+        with self.assertRaises(FloatingPointError):
+            train.fit(x, torch.zeros((8, 60)), segs, segs, epochs=2, seed=0, log=lambda line: None)
+
+    def test_wall_clock_limit_stops_after_the_epoch_and_keeps_the_best_weights(self):
+        x = torch.as_tensor(np.random.default_rng(23).normal(size=(8, 2, 96, 60)).astype(np.float32))
+        segs = [np.arange(8)]
+        model, history, best, stopped = train.fit(x, torch.zeros((8, 60)), segs, segs, epochs=5, seed=0, log=lambda line: None, max_minutes=0.0)
+        self.assertEqual(("time", 1, 1), (stopped, len(history), best))  # 상한 0분: 첫 epoch 뒤 멈춤
+
+
 class InstrumentsTest(unittest.TestCase):
     def test_baselines_and_templates_come_from_training_frames_only(self):
         rng = np.random.default_rng(21)
