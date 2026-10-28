@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.watchpose.handsonar.mobile.session.SessionController
 import com.watchpose.handsonar.mobile.session.SessionSummary
 import com.watchpose.handsonar.mobile.session.UiState
+import com.watchpose.handsonar.mobile.transfer.InboxStatus
 import com.watchpose.handsonar.shared.SessionMeta
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -35,10 +36,11 @@ import java.util.Locale
 
 /**
  * 기록 화면(설계 §6.3, 이번 계획 범위): 보관·휴지통 목록, 세션마다 시각·길이·손 인식·워치 처프·표지음·의심, 휴지통으로·되살리기·완전 삭제
- * (확인 창 뒤, 휴지통에서만), 오늘과 전체 수집 시간(보관한 세션). 영상 재생·타임라인·메모는 다음 폰 계획.
+ * (확인 창 뒤, 휴지통에서만), 오늘과 전체 수집 시간(보관한 세션), 워치에서 받은 녹음 줄([inbox], 전송 설계 §3).
+ * 영상 재생·타임라인·메모는 다음 폰 계획.
  */
 @Composable
-fun RecordsScreen(ui: UiState, c: SessionController) {
+fun RecordsScreen(ui: UiState, c: SessionController, inbox: InboxStatus) {
     var deleteTarget by remember { mutableStateOf<SessionSummary?>(null) }
     val kept = ui.records.filter { it.status != SessionMeta.STATUS_TRASH }
     val trash = ui.records.filter { it.status == SessionMeta.STATUS_TRASH }
@@ -56,6 +58,7 @@ fun RecordsScreen(ui: UiState, c: SessionController) {
             FilterChip(selected = !ui.showTrash, onClick = { c.setShowTrash(false) }, label = { Text("보관 ${kept.size}") })
             FilterChip(selected = ui.showTrash, onClick = { c.setShowTrash(true) }, label = { Text("휴지통 ${trash.size}") })
         }
+        WatchInboxLine(inbox)
         ui.error?.let { WarningText(it) }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(if (ui.showTrash) trash else kept, key = { it.name }) { s ->
