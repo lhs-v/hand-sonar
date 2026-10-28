@@ -31,6 +31,7 @@ import com.watchpose.handsonar.shared.MarkerMeta
 import com.watchpose.handsonar.shared.PhoneAudioJson
 import com.watchpose.handsonar.shared.Posture
 import com.watchpose.handsonar.shared.PromptPlanner
+import com.watchpose.handsonar.shared.RewearMark
 import com.watchpose.handsonar.shared.RunnerEvent
 import com.watchpose.handsonar.shared.RunnerPhase
 import com.watchpose.handsonar.shared.SensorPlan
@@ -103,7 +104,10 @@ data class UiState(
     val trackedHand: TrackedHand = TrackedHand.LEFT,
     /** 세션 정보(전송 설계 §8, 계획 6): 준비 화면에서 고르고 다음 실행에도 남는다. 세션을 시작할 때 meta.json `context`에 들어간다. */
     val context: SessionContext = SessionContext(),
-    /** "워치 다시 참": 켜져 있으면 다음 세션의 meta.json `rewear`가 참이다. 그 세션이 보관되면 꺼지고, 그 세션을 되돌리면 다시 켜진다. */
+    /**
+     * "워치 다시 참": 켜져 있으면 다음 세션의 meta.json `rewear`가 참이다. 그 세션이 보관되면 꺼지고, 다음 세션 전에 그 세션을 휴지통으로 보내면
+     * (되돌리기·기록 화면) 다시 켜지며, 그 뒤 되살리면 다시 꺼진다(shared `RewearMark`).
+     */
     val rewear: Boolean = false,
     // 수집 중
     val phase: RunnerPhase = RunnerPhase.IDLE,
@@ -139,13 +143,17 @@ private class FoundMarker(val found: MarkerFound, val elapsedNs: Long?)
  * 폰 센서(전송 설계 §8, 계획 6): 세션 동안 [SensorRecorder]가 가속도·자이로·주변 밝기를 `phone_sensors-NNN.csv`에 적고, 세션을 닫을 때
  * meta.json(끝)보다 먼저 닫아 그 보고를 meta.json `sensors`에 넣는다. 센서를 못 열어도 세션은 이어 간다.
  * 세션 정보·"워치 다시 참"(전송 설계 §8, 계획 6): 준비 화면에서 고른 값은 앱 설정 `phone`에 남고, 세션을 시작할 때 meta.json `context`·`rewear`에
- * 들어간다. "다시 참"은 그 세션이 보관되면 꺼지고(취소면 켜 둠), 방금 세션을 되돌리면 다시 켜진다.
+ * 들어간다. "다시 참"의 켬·끔은 shared `RewearMark`가 정하고(그 세션이 보관되면 끔, 취소면 켜 둠, 다음 세션 전에 그 세션을 휴지통으로 보내면
+ * 다시 켬, 되살리면 다시 끔 — 한 번 다시 찬 것에 표시가 두 세션에 남지 않게, 검토 M1), 바뀔 때마다 `commit`으로 바로 남긴다(검토 M11).
  */
 class SessionController(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val store = SessionStore(app)
     private val audioManager: AudioManager? = app.getSystemService(AudioManager::class.java)
     private val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** "워치 다시 참" 표시(주 스레드에서만). 앱 설정에서 읽어 시작한다. */
+    private val rewearMark = RewearMark<File>(prefs.getBoolean(PREF_REWEAR, false))
 
     private val state = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = state.asStateFlow()
@@ -172,7 +180,7 @@ class SessionController(private val app: Application) {
         val hand = TrackedHand.entries.firstOrNull { it.id == saved } ?: TrackedHand.LEFT
         camera.trackedHand = hand
         // 세션 정보와 "워치 다시 참"도 다음 실행에 남는다(계획 6)
-        state.update { it.copy(trackedHand = hand, context = readContext(), rewear = prefs.getBoolean(PREF_REWEAR, false)) }
+        state.update { it.copy(trackedHand = hand, context = readContext(), rewear = rewearMark.on) }
         // 외부 출력 감시는 앱 수명 동안 이어 가므로(조정자가 앱 하나에 하나) 풀지 않는다. 시작 때 현재 목록을 한 번 채운다.
         audioManager?.registerAudioDeviceCallback(outputCallback, Handler(Looper.getMainLooper()))
         refreshOutputs()
@@ -193,9 +201,6 @@ class SessionController(private val app: Application) {
     private var endMarkerPlayNs = 0L
     private var loopJob: Job? = null
     private var appVisible = true
-
-    /** 방금 보관한 세션([UiState.lastDir])이 "워치 다시 참"으로 적혔다: 되돌리면 표시를 다시 켠다. */
-    private var lastRewear = false
 
     /** 권한을 받은 뒤(화면이 다시 만들어질 때마다) 부른다: 카메라를 이 화면에 잇고, 마이크·표지음을 연다. */
     @MainThread
@@ -291,12 +296,14 @@ class SessionController(private val app: Application) {
     @MainThread
     fun toggleRewear() {
         if (runner != null || state.value.busy) return
-        setRewear(!state.value.rewear)
+        rewearMark.toggle()
+        saveRewear()
     }
 
-    private fun setRewear(on: Boolean) {
-        prefs.edit().putBoolean(PREF_REWEAR, on).apply()
-        state.update { it.copy(rewear = on) }
+    /** 표시를 바로 남기고(commit — 보관 직후 앱이 죽어도 꺼진 것이 남게, 검토 M11) 화면에 알린다. */
+    private fun saveRewear() {
+        prefs.edit().putBoolean(PREF_REWEAR, rewearMark.on).commit()
+        state.update { it.copy(rewear = rewearMark.on) }
     }
 
     private fun readContext(): SessionContext {
@@ -338,7 +345,7 @@ class SessionController(private val app: Application) {
             flags = emptyList(),
             memo = "",
             stats = null,
-            rewear = state.value.rewear, // 준비 화면 "워치 다시 참"(계획 6)
+            rewear = rewearMark.on, // 준비 화면 "워치 다시 참"(계획 6)
             video = null,
             audioFile = SessionStore.AUDIO,
             audioSource = mic.sourceName,
@@ -353,7 +360,7 @@ class SessionController(private val app: Application) {
         }
         sessionDir = dir
         baseMeta = meta
-        lastRewear = false // 앞 세션은 이제 되돌릴 수 없다(lastDir도 지운다)
+        rewearMark.started() // 앞 세션은 이제 "다시 참" 규칙에서 빠진다(그 뒤 세션은 같은 착용)
         startMarker = null
         startMarkerPlayNs = 0L
         endMarkerPlayNs = 0L
@@ -420,9 +427,9 @@ class SessionController(private val app: Application) {
         val dir = state.value.lastDir ?: return
         scope.launch {
             val ok = withContext(Dispatchers.IO) { runCatching { store.setStatus(dir, SessionMeta.STATUS_TRASH) }.isSuccess }
-            if (ok && lastRewear) {
-                lastRewear = false
-                setRewear(true)
+            if (ok) {
+                rewearMark.trashed(dir)
+                saveRewear()
             }
             state.update {
                 if (ok) it.copy(lastDir = null, summary = it.summary?.copy(undone = true)) else it.copy(error = "되돌리기 실패: meta.json을 못 바꿈")
@@ -453,11 +460,20 @@ class SessionController(private val app: Application) {
         refreshEnvironment()
     }
 
+    /** 기록 화면의 휴지통. 방금 보관한 "다시 참" 세션이면 되돌리기와 같이 표시를 다시 켜고, 더는 되돌릴 대상이 아니다(검토 M1). */
     @MainThread
-    fun trash(dir: File) = changeStatus(dir, SessionMeta.STATUS_TRASH)
+    fun trash(dir: File) = changeStatus(dir, SessionMeta.STATUS_TRASH) {
+        rewearMark.trashed(dir)
+        saveRewear()
+        if (state.value.lastDir == dir) state.update { it.copy(lastDir = null) }
+    }
 
+    /** 기록 화면의 되살리기. 휴지통으로 보내 "다시 참"을 다시 켰던 그 세션이면 표시를 다시 끈다(두 세션에 표시가 남지 않게). */
     @MainThread
-    fun restore(dir: File) = changeStatus(dir, SessionMeta.STATUS_KEPT)
+    fun restore(dir: File) = changeStatus(dir, SessionMeta.STATUS_KEPT) {
+        rewearMark.restored(dir)
+        saveRewear()
+    }
 
     /** 휴지통 세션을 지운다(되돌릴 수 없음). 기록 화면에서 사용자가 확인한 뒤에만 부른다. */
     @MainThread
@@ -474,10 +490,11 @@ class SessionController(private val app: Application) {
         }
     }
 
-    private fun changeStatus(dir: File, status: String) {
+    /** meta.json status를 바꾸고, 되면 [then](주 스레드)을 부른다. */
+    private fun changeStatus(dir: File, status: String, then: () -> Unit) {
         scope.launch {
             val ok = withContext(Dispatchers.IO) { runCatching { store.setStatus(dir, status) }.isSuccess }
-            if (!ok) state.update { it.copy(error = "상태를 못 바꿈: ${dir.name}") }
+            if (ok) then() else state.update { it.copy(error = "상태를 못 바꿈: ${dir.name}") }
             reloadRecords()
         }
     }
@@ -645,8 +662,8 @@ class SessionController(private val app: Application) {
             }
             outcome.onSuccess { summary ->
                 // "워치 다시 참"은 다시 찬 뒤 첫 보관 세션에 적고 끈다. 취소한 세션(휴지통)이면 켜 둔다: 첫 보관 세션은 아직 오지 않았다.
-                lastRewear = !cancelled && meta0.rewear
-                if (lastRewear) setRewear(false)
+                rewearMark.closed(dir, marked = meta0.rewear, kept = !cancelled)
+                saveRewear()
                 state.update {
                     it.copy(
                         busy = false,

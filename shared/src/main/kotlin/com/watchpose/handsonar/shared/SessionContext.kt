@@ -47,12 +47,17 @@ data class SessionContext(
     ).joinToString(" · ").ifEmpty { "세션 정보 없음" }
 
     companion object {
-        /** 장소 글의 최대 길이. */
+        /** 장소 글의 최대 길이(글자 = 코드 포인트, 이모지도 한 글자). */
         const val MAX_PLACE = 40
 
-        /** 손으로 쓴 장소 글을 다듬는다: 줄바꿈·이어진 공백을 한 칸으로, 앞뒤 공백을 빼고 [MAX_PLACE]자까지. */
-        fun cleanPlace(text: String): String = text.replace(WHITESPACE, " ").trim().take(MAX_PLACE)
+        /** 손으로 쓴 장소 글을 다듬는다: 줄바꿈·이어진 공백(전각 공백 포함)을 한 칸으로, 앞뒤 공백을 빼고 [MAX_PLACE]자까지([limit]). */
+        fun cleanPlace(text: String): String = limit(text.replace(WHITESPACE, " ").trim())
 
-        private val WHITESPACE = Regex("""\s+""")
+        /** [MAX_PLACE]자까지 자른다. 코드 포인트로 세어 이모지(UTF-16 두 칸)를 반으로 자르지 않는다(검토 M11). 입력 창도 이것으로 막는다. */
+        fun limit(text: String): String =
+            if (text.codePointCount(0, text.length) <= MAX_PLACE) text else text.substring(0, text.offsetByCodePoints(0, MAX_PLACE))
+
+        /** 유니코드 공백(`(?U)` — 전각 공백 U+3000도 든다). */
+        private val WHITESPACE = Regex("""(?U)\s+""")
     }
 }

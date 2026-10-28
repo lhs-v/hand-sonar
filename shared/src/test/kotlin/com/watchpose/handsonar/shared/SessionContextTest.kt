@@ -2,6 +2,7 @@ package com.watchpose.handsonar.shared
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class SessionContextTest {
     @Test
@@ -32,7 +33,18 @@ class SessionContextTest {
     @Test
     fun placeIsOneTrimmedLineOfAtMostFortyChars() {
         assertEquals("집 책상", SessionContext.cleanPlace("  집\n  책상 "))
+        assertEquals("집 책상", SessionContext.cleanPlace("집　　책상　")) // 전각 공백도 공백이다
         assertEquals(SessionContext.MAX_PLACE, SessionContext.cleanPlace("가".repeat(100)).length)
         assertEquals("", SessionContext.cleanPlace(" \t "))
+    }
+
+    @Test
+    fun cuttingNeverSplitsASurrogatePair() {
+        // 이모지는 UTF-16 두 칸이다: 40자 자르기가 반쪽을 남기면 meta.json에 깨진 글자가 된다
+        val cut = SessionContext.limit("가" + "😀".repeat(50))
+        assertEquals(SessionContext.MAX_PLACE, cut.codePointCount(0, cut.length))
+        assertTrue(Character.isSurrogatePair(cut[cut.length - 2], cut[cut.length - 1]))
+        assertEquals(cut, SessionContext.cleanPlace("가" + "😀".repeat(50)))
+        assertEquals("짧음", SessionContext.limit("짧음"))
     }
 }
