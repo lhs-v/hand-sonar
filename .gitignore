@@ -29,3 +29,6 @@ mobile/src/main/assets/hand_landmarker.task
 *.npy
 *.npz
 *.png
+
+# 학습한 모델도 저장소 밖 hand-sonar-data/processed/training에 둔다
+*.pt

@@ -9,7 +9,7 @@
 | `wear/` | 워치 앱. 18–21 kHz 처프(600 샘플, 48 kHz)를 계속 내면서 마이크를 녹음합니다. 1분 조각 WAV와 기록(`rec.json`)을 남깁니다. |
 | `mobile/` | 폰 앱. 정면 카메라와 MediaPipe Hand Landmarker로 손 관절 21점을 프레임마다 적고(`landmarks.csv`), 같은 프레임을 영상(`video.mp4`)으로 남깁니다. 안내 동작(손가락 굽히기, ASL 숫자, 손목, 자유 동작)을 시간표대로 띄우고(`prompts.csv`), 세션 시작과 끝에 표지음을 냅니다. |
 | `shared/` | 두 앱이 같이 쓰는 순수 Kotlin 코드입니다(처프·표지음 규격, 검출기, 파일 형식, 세션 진행). JVM 시험이 있습니다. |
-| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 공개 데이터와 나란히 보기(`compare.py`). |
+| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`). |
 
 ## 두 기기 시간 맞추기
 
@@ -20,7 +20,7 @@
 - JDK 17 이상과 Android SDK 36이 필요합니다. `local.properties`에 `sdk.dir`를 적습니다(Android Studio가 만들어 줍니다).
 - `./gradlew :wear:assembleDebug :mobile:assembleDebug`
 - 폰 앱이 쓰는 MediaPipe 손 모델(`hand_landmarker.task`, 7.8 MB)은 저장소에 없습니다. 첫 빌드 때 구글 공식 주소에서 받아 SHA-256을 확인합니다. 인터넷이 없으면 `-PhandModelUrl=file:///경로/hand_landmarker.task`로 가진 파일을 씁니다.
-- 시험: `./gradlew :shared:test`, `python -I -m unittest discover -s tools/tests -t tools`
+- 시험: `./gradlew :shared:test`, `python -I -m unittest discover -s tools/tests -t tools`(학습 시험은 torch·timm이 필요합니다)
 
 ## PC 처리
 
@@ -32,6 +32,7 @@
 4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`). 지연이 1프레임(33 ms) 밖이거나 상관 봉우리가 문턱(0.1) 아래면 맞춤을 확인하지 못한 세션으로 적고 끝 코드 1로 끝납니다.
 5. `python -I tools/pairs.py` — 카메라 프레임마다 프로파일 줄을 짝짓습니다(`pairs.csv`). 지연이 1프레임 안이고 상관이 문턱 이상인 세션만, 그리고 `sync.json`이 지금의 `align.json`·`rows.npz`·`landmarks.csv`에서 잰 것일 때만 짝짓습니다. 아니면 `pairs.csv`를 쓰지 않고(옛 것은 `pairs.stale.csv`로 바꿈) 끝 코드 1로 끝납니다.
 6. `python -I tools/compare.py <세션>` — 공개 데이터 왼손 표본과 나란히 그린 그림입니다(`compare.png`, 표본 위치는 `--public`).
+7. `python -I tools/train.py --mode overfit|time --run <이름>` — 대응표까지 만든 세션(표지음 둘, 맞춤 확인)으로 FastViT-T12(timm `fastvit_t12`, 처음부터)를 학습해 손목 기준 손 관절 20점을 회귀하고 평가합니다. `overfit`은 모든 프레임으로 학습·평가하고(외울 수 있는지), `time`은 세션마다 앞 70% 학습·15% 검증·끝 15% 시험입니다. 결과는 `../hand-sonar-data/processed/training/<이름>/`(`dataset.npz`, `model.pt`, `metrics.json`, `report.png`)에 씁니다. torch(CUDA)와 timm이 필요합니다. 공개 데이터로는 학습하지 않습니다.
 
 ## 설치와 사용
 
