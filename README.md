@@ -88,3 +88,5 @@ handsonar.keyPassword=android
 ## 데이터
 
 수집한 녹음과 영상(얼굴이 찍힘)은 이 저장소에 넣지 않습니다.
+
+공개 WatchHand 데이터셋(Cornell eCommons)으로 학습하려는 경우의 영상–에코 프로파일 시간 맞추기, 검증, 관절 정답 만들기는 [docs/public-watchhand-data.md](docs/public-watchhand-data.md)에 있습니다.
