@@ -1,8 +1,98 @@
+import csv
+import json
+import os
+import tempfile
 import unittest
 
 import dataset  # 사용자 설치 numpy 경로도 여기서 붙는다
 
+import hs_io  # noqa: E402
+import joints  # noqa: E402
 import numpy as np  # noqa: E402
+import pairs  # noqa: E402
+import verify_sync  # noqa: E402
+
+NAME = "20990101-000005"
+T0 = 1_600_000_000_000_000  # 첫 카메라 프레임(폰 elapsedNs)
+SEC = 1_000_000_000
+FRAMES = 240  # 30 fps 8 s
+ROWS = 880  # 프로파일 줄(12.5 ms): 첫 프레임 1 s 앞부터 11 s
+ROW0 = T0 - SEC  # 줄 0 가운데 시각
+ROW_NS = 12_500_000
+LAG_MS = 7.5
+NO_HAND = (20, 21, 150)  # 손이 안 보인 프레임
+BIG = (40, 170)  # MediaPipe 크기가 1.3배로 튄 프레임(길이 거르기로 빠진다)
+BAD_ROW = 300  # ok가 아닌 프로파일 줄(이 줄을 창에 품는 프레임이 빠진다)
+CLASSES = ((0, "엄지 굽히기"), (10, "숫자 5"), (15, "손목 젖히기"), (-1, "자유 동작"))  # 2 s씩
+
+
+def real_hand(n):
+    """프레임 n의 실제 왼손 21점(m, 손바닥이 아래, 엄지 +x, 손가락 +y, 손등 +z). 검지가 프레임마다 다르게 굽어 프레임 번호가 손 모양에 새겨진다."""
+    p = np.zeros((21, 3))
+    p[1:5] = ((0.025, 0.025, -0.012), (0.045, 0.045, -0.022), (0.058, 0.065, -0.030), (0.066, 0.085, -0.035))  # 엄지는 손바닥 쪽(−z)
+    for base, mcp in zip((5, 9, 13, 17), ((0.020, 0.090, 0.0), (0.0, 0.095, 0.002), (-0.017, 0.088, 0.001), (-0.033, 0.078, -0.002))):
+        p[base] = mcp
+        bend = 0.004 * n if base == 5 else 0.2
+        for s, length in enumerate((0.040, 0.025, 0.022)):
+            angle = bend * (s + 1)
+            p[base + s + 1] = p[base + s] + length * np.array([0.0, np.cos(angle), -np.sin(angle)])
+    return p
+
+
+def file_world(n):
+    """landmarks.csv에 적히는 world(거울 그림 기준, wx → −wx): 크기는 프레임마다 ±1% 흔들리고 BIG 프레임만 1.3배."""
+    scale = 1.3 if n in BIG else 1.0 + 0.01 * np.sin(n)
+    return real_hand(n) * scale * joints.MIRROR
+
+
+def raw_profiles():
+    """원본 프로파일 (600, ROWS): 열 j는 씨앗값 j의 무늬라 줄 번호가 값에 새겨진다(창이 한 줄만 어긋나도 다르다)."""
+    return np.stack([np.random.default_rng(j).normal(size=600) for j in range(ROWS)], axis=1)
+
+
+def write_session(data, lag_ms=LAG_MS):
+    """합성 세션 하나(meta·landmarks·prompts·align·rows·profiles·sync)를 쓰고 pairs.py로 pairs.csv를 만든다. 영상은 쓸 수 없는 세션이다."""
+    folder = os.path.join(data, "phone", "sessions", NAME)
+    out = os.path.join(data, "processed", NAME)
+    os.makedirs(folder)
+    os.makedirs(out)
+    meta = {"format": 1, "status": "kept", "cancelled": False, "hand": "left", "rewear": True, "camera": {"timeBase": "realtime"},
+            "start": {"wallMs": 1_000, "elapsedNs": T0 - SEC}, "end": {"wallMs": 10_000, "elapsedNs": T0 + 9 * SEC},
+            "stats": {"frames": FRAMES}, "video": {"ok": False, "frames": 0}}
+    with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    with open(os.path.join(folder, "landmarks.csv"), "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["frameNs", "hands", "handedness", "score"] + [f"v{i}" for i in range(126)])
+        for n in range(FRAMES):
+            t = T0 + n * SEC // 30
+            if n in NO_HAND:
+                w.writerow([t, 0, "", ""] + [""] * 126)
+            else:
+                w.writerow([t, 1, "Left", 0.95] + [0.5] * 63 + file_world(n).ravel().tolist())
+    with open(os.path.join(folder, "prompts.csv"), "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, lineterminator="\n")
+        w.writerow(["index", "segment", "classId", "name", "startNs", "endNs", "flag"])
+        for i, (cls, label) in enumerate(CLASSES):
+            w.writerow([i, i + 1, cls, label, T0 + 2 * i * SEC, T0 + 2 * (i + 1) * SEC, ""])
+    hs_io.write_json(os.path.join(out, "align.json"), {"format": 1, "session": NAME, "method": "two"})
+    ok = np.ones(ROWS, dtype=bool)
+    ok[BAD_ROW] = False
+    np.savez(os.path.join(out, "rows.npz"), ns=ROW0 + np.arange(ROWS, dtype=np.float64) * ROW_NS, ok=ok,
+             alignSha=np.array(hs_io.sha256(os.path.join(out, "align.json"))))
+    raw = raw_profiles()
+    np.save(os.path.join(out, "profiles.npy"), raw)
+    np.save(os.path.join(out, "diff_profiles.npy"), np.abs(raw[:, 1:]) - np.abs(raw[:, :-1]))
+    write_sync(data, lag_ms)
+    _, done = pairs.run(data, NAME)
+    assert done
+    return raw
+
+
+def write_sync(data, lag_ms):
+    sync = {"format": 2, "session": NAME, "lagMs": lag_ms, "peak": 0.2, "withinFrame": True, "inputs": verify_sync.inputs(data, NAME)}
+    sync["usable"] = verify_sync.usable(sync)[0]
+    hs_io.write_json(os.path.join(data, "processed", NAME, "sync.json"), sync)
 
 
 class WindowTest(unittest.TestCase):
@@ -29,6 +119,48 @@ class WindowTest(unittest.TestCase):
         ok[54] = False
         # r = 150은 원본 열 55…150만 쓰지만 첫 차분 열 54가 원본 줄 54를 쓴다
         np.testing.assert_array_equal(dataset.window_ok(ok, [95, 149, 150, 151, 399, 400]), [False, False, False, True, True, False])
+
+
+class SessionFolderTest(unittest.TestCase):
+    def test_windows_targets_and_labels_stay_paired_through_the_filters(self):
+        with tempfile.TemporaryDirectory() as data:
+            raw = write_session(data)
+            diff = np.abs(raw[:, 1:]) - np.abs(raw[:, :-1])
+            ds, lines = dataset.build(data)
+            self.assertIsNotNone(ds, "\n".join(lines))
+            ns = T0 + np.arange(FRAMES) * SEC // 30
+            rows = np.rint((ns - LAG_MS * 1e6 - ROW0) / ROW_NS).astype(int)  # 프레임마다 소리 시각에 가장 가까운 줄(지연 뺌)
+            expect = [n for n in range(FRAMES) if n not in NO_HAND and n not in BIG and rows[n] >= 96 and not rows[n] - 96 <= BAD_ROW <= rows[n]]
+            frame = np.rint((ds["frame_ns"] - T0) * 30 / SEC).astype(int)  # 시각에서 되짚은 프레임 번호
+            np.testing.assert_array_equal(expect, frame)  # 손 없음·크기 튐·앞 줄 모자람·ok 아닌 줄을 품은 창만 빠진다(영상 칸이 비어도 쓴다)
+            self.assertTrue(any("영상" in line for line in lines))  # 영상 조건은 거르지 않고 알리기만 한다
+            np.testing.assert_array_equal(rows[frame], ds["row"])
+            targets = np.stack([joints.targets(file_world(n)[None], "left")[0][0] for n in frame])
+            np.testing.assert_allclose(ds["y"].reshape(-1, 20, 3), targets, atol=1e-6)  # 목표는 그 프레임의 손(검지 굽힘에 새긴 번호)
+            for i, r in enumerate(rows[frame]):  # 창은 그 프레임의 짝 줄에서 끝난다(열 무늬에 새긴 줄 번호)
+                np.testing.assert_allclose(ds["x"][i, 0], dataset.standardize(raw[300:360, r - 95: r + 1].T), atol=1e-5)
+                np.testing.assert_allclose(ds["x"][i, 1], dataset.standardize(diff[300:360, r - 96: r].T), atol=1e-5)
+            r = rows[frame[0]]
+            self.assertGreater(float(np.abs(ds["x"][0, 0] - dataset.standardize(raw[300:360, r - 94: r + 2].T)).max()), 0.5)  # 한 줄 어긋나면 다르다
+            np.testing.assert_array_equal([CLASSES[min(n // 60, 3)][0] for n in frame], ds["class_id"])
+            np.testing.assert_array_equal(frame % 60 >= 15, ds["labelled"])  # 동작 시작 0.5 s(15프레임)는 경계라 라벨이 아니다
+            self.assertEqual([True], ds["rewear"].tolist())
+            path = os.path.join(data, "dataset.npz")
+            dataset.save(path, ds)
+            saved = dataset.load(path)
+            self.assertNotIn("x", saved)  # 기본은 창 없이 쓴다
+            self.assertEqual(list(verify_sync.inputs(data, NAME).values()), saved["inputs"][0].tolist())
+            np.testing.assert_array_equal(ds["x"], dataset.windows(raw, diff, saved["row"]))  # 창은 profiles에서 row로 다시 만든다
+            dataset.save(path, ds, with_x=True)
+            self.assertIn("x", dataset.load(path))
+
+    def test_pairs_made_with_an_old_lag_are_skipped(self):
+        with tempfile.TemporaryDirectory() as data:
+            write_session(data)
+            write_sync(data, LAG_MS + 1.0)  # verify_sync.py만 다시 돌아 지연이 바뀌고 pairs.py는 다시 돌지 않은 경우(입력 지문은 그대로)
+            ds, lines = dataset.build(data)
+            self.assertIsNone(ds)
+            self.assertTrue(any("soundNs" in line and "pairs.py" in line for line in lines), "\n".join(lines))
 
 
 class TimeSplitTest(unittest.TestCase):

@@ -1,14 +1,18 @@
 """학습 자료: 카메라 프레임 하나에 에코 창 하나와 손 관절 목표 하나(손 소나 계획 4, 학습 설계 §2·§4).
 
-    python -I tools/dataset.py [--data 데이터 폴더] [--out dataset.npz] [세션 이름 …]   (보통은 train.py가 부른다)
+    python -I tools/dataset.py [--data 데이터 폴더] [--out dataset.npz] [--save-x] [세션 이름 …]   (보통은 train.py가 부른다)
 
 - 쓰는 세션(설계 §2): hs_io.chosen이 고른 세션 중 align.json이 "표지음 둘"(method two)이고, sync.json이 usable이며 그 입력 지문
   (align.json·rows.npz·landmarks.csv)이 지금 파일과 같고, pairs.csv가 있는 것. "표지음 하나" 세션은 쓰지 않는다.
 - 창: pairs.csv의 짝 줄 r에서 끝나는 96줄(1.2 s, 인과적 정렬), 칸 300–359(60칸, 직접 경로부터 약 21.4 cm). 채널 0은 원본(부호 있는
   상관), 채널 1은 차분이다. 차분 열 j는 원본 줄 j+1의 변화라(pairs.py) 원본 열 r−95…r에 맞는 차분 열은 r−96…r−1이다.
   창마다 채널별로 평균을 빼고 표준편차로 나눈다. 모양 (2, 96, 60).
-- 거르기: pairs.csv hand·direct가 1이고 video 칸이 있으며(영상 n = 줄 n), 창이 쓰는 원본 줄 r−96…r(차분 첫 열이 원본 줄 r−96도 쓰므로
-  97줄)이 모두 rows.npz ok이고, 정답 거르기(joints.keep_frames: 점수·손목 튐·길이 ±3σ)를 지난 프레임만 쓴다. 길이 거르기가 동작
+- 대응표 확인: pairs.csv의 soundNs가 지금 sync.json 지연으로 만든 값(soundNs − frameNs = −lagMs·1e6, ±1 ns)이 아니면 그 세션을 건너뛴다
+  (verify_sync.py만 다시 돌고 pairs.py는 다시 돌지 않아 옛 지연의 row가 남은 경우. 입력 지문은 같아 eligible로는 못 가린다).
+- 거르기: pairs.csv hand·direct가 1이고, 창이 쓰는 원본 줄 r−96…r(차분 첫 열이 원본 줄 r−96도 쓰므로 97줄)이 모두 rows.npz ok이고,
+  정답 거르기(joints.keep_frames: 점수·손목 튐·길이 ±3σ)를 지난 프레임만 쓴다. 영상 조건(pairs.csv video 칸)으로는 거르지 않고 알리기만
+  한다: 정답은 영상 없이 landmarks.csv frameNs로 맞추고(수집 설계 §8.1), video 칸은 세션 단위로 모두 차거나 모두 비어 영상 인코더가
+  한 번 어긋난 세션을 통째로 버리게 되기 때문이다. 길이 거르기가 동작
   종류별로 뺀 비율을 보고 줄에 적고, 한 종류가 치우쳐 빠지면(전체 비율의 2배 넘게) 그 사실도 적는다. 거울을 되돌린 손에서 엄지가
   손바닥 쪽인 프레임(joints.thumb_palmar)이 90% 아래인 세션은 손 방향 처리가 틀렸거나 반쯤 거울인 것이라 쓰지 않는다.
 - 동작 라벨(평가용, 학습 목표 아님): pairs.csv prompt·classId·flag·edge. 라벨로 쓸 줄 = prompt ≥ 0, edge 0, 일시정지 아님,
@@ -23,11 +27,13 @@
     낙관적 상한이다: 원본 채널이 세션 안 시각을 담고 있어 학습 블록 사이에 낀 시험 블록은 표류를 보간할 수 있다.
   - time_split(세션 안): 세션마다 프레임 시각 순서로 앞 70% 학습, 다음 15% 검증, 나머지 시험. 검증·시험은 앞쪽 경계 뒤 2 s 안의
     프레임을 버린다(창 1.2 s가 앞쪽 정답 시각과 겹치지 않게). 안내 시간표가 고정 순서라 시험은 늘 자유 동작 꼬리다.
-dataset.npz(allow_pickle 없이 읽힘): x (N, 2, 96, 60) float32, y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
+dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), sessions·hands (S,) 문자열,
 length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
-label_names (K,) 문자열.
+label_names (K,) 문자열, input_files (3,) 문자열(verify_sync.INPUTS)과 inputs (S, 3) 문자열(그 세션 sync.json의 입력 SHA-256 지문).
+창 x (N, 2, 96, 60) float32는 기본으로 쓰지 않는다(프레임당 46 KB, 세션당 약 170 MB). 창은 지문이 같은 processed 폴더의
+profiles.npy·diff_profiles.npy에서 row로 다시 만든다(windows). save(…, with_x=True)(명령의 --save-x)일 때만 x도 쓴다.
 """
 import argparse
 import csv
@@ -50,6 +56,7 @@ KINDS = (("finger", "손가락 굽히기"), ("asl", "ASL 숫자"), ("wrist", "�
 KIND_KEYS = tuple(k for k, _ in KINDS) + ("none",)  # 마지막 none = 라벨 없음(동작 시작 0.5 s·쉬는 때·동작 밖)
 SKEW_RATIO = 2.0  # 길이 거르기가 한 동작 종류에서 전체 비율의 이 배 넘게 빼면 치우쳤다고 알린다(20261027-235412: 손목 10%, 전체 2%)
 SKEW_MIN_FRAMES = 5  # 몇 프레임뿐인 우연은 알리지 않는다
+LAG_TOL_NS = 1  # pairs.csv soundNs가 frameNs − sync.json lagMs(pairs.py와 같은 float64 셈)에서 이만큼 넘게 다르면 옛 지연으로 만든 대응표다(실데이터 0.5 ns 안)
 BLOCK_SEC = 10.0  # 블록 나누기: 세션 시간표를 이 길이의 블록으로 자른다
 BLOCK_PERIOD = 20  # 블록 번호 mod 20(+offset)으로 역할을 정한다: 학습 14 · 검증 3 · 시험 3자리 = 70/15/15
 BLOCK_TEST = (0, 7, 14)  # 시험 자리: 20블록 안에 고르게 흩어짐(7·7·6칸 간격). 이 세션(22블록)에서는 자리 0이 두 번(블록 0·20) 나와 시험 4블록
@@ -96,9 +103,16 @@ def read_pairs(path):
     def ints(key, empty):
         return np.array([int(r[key]) if r[key] != "" else empty for r in rows], dtype=np.int64)
 
-    return {"frameNs": ints("frameNs", 0), "row": ints("row", -1), "hand": ints("hand", 0), "direct": ints("direct", 0),
-            "prompt": ints("prompt", -1), "classId": ints("classId", pairs.NO_CLASS), "edge": ints("edge", 0),
+    return {"frameNs": ints("frameNs", 0), "soundNs": ints("soundNs", 0), "row": ints("row", -1), "hand": ints("hand", 0),
+            "direct": ints("direct", 0), "prompt": ints("prompt", -1), "classId": ints("classId", pairs.NO_CLASS), "edge": ints("edge", 0),
             "video": ints("video", -1), "flag": np.array([r["flag"] for r in rows], dtype=str)}
+
+
+def lag_mismatch(p, lag_ms):
+    """pairs.csv(read_pairs)의 soundNs가 지연 lag_ms로 만든 값과 다른 프레임 수. pairs.py는 soundNs = round(frameNs − lagMs·1e6)를 float64로
+    셈하므로 같은 셈과 견준다(폰 가동 시간이 길어 frameNs가 2^52 ns를 넘어도 ±1 ns 안에 든다)."""
+    expected = np.round(p["frameNs"].astype(np.float64) - lag_ms * 1e6)
+    return int((np.abs(p["soundNs"] - expected) > LAG_TOL_NS).sum())
 
 
 def eligible(data, name):
@@ -160,6 +174,12 @@ def session_data(data, name):
     out = os.path.join(data, "processed", name)
     folder = hs_io.session_folder(data, name)
     p = read_pairs(os.path.join(out, "pairs.csv"))
+    sync = hs_io.read_json(os.path.join(out, "sync.json"))
+    lag_ms = hs_io.num(sync, "lagMs")
+    stale = lag_mismatch(p, lag_ms)
+    if stale:
+        return None, [f"{name}: 건너뜀(pairs.csv soundNs가 지금 sync.json 지연 {lag_ms:+.3f} ms로 만든 값과 {stale}프레임에서 다름 — 옛 지연으로 만든"
+                      " 대응표: pairs.py를 다시)"]
     ok = np.load(os.path.join(out, "rows.npz"), allow_pickle=False)["ok"]
     raw = np.load(os.path.join(out, "profiles.npy"), mmap_mode="r", allow_pickle=False)
     diff = np.load(os.path.join(out, "diff_profiles.npy"), mmap_mode="r", allow_pickle=False)
@@ -172,15 +192,18 @@ def session_data(data, name):
     hand = phone.hand
     good, length = joints.keep_frames(marks.world, marks.score, marks.valid)
     base, _ = joints.scored(marks.world, marks.score, marks.valid)
-    paired = (p["hand"] == 1) & (p["direct"] == 1) & (p["video"] >= 0)
+    paired = (p["hand"] == 1) & (p["direct"] == 1)
     windowed = window_ok(ok, p["row"])
     use = paired & windowed & good
     scored = np.nan_to_num(marks.score, nan=-1.0) >= joints.MIN_SCORE
     lines = [f"{name}({hand}): 프레임 {len(use)}개 중 {int(use.sum())}개 씀",
-             f"  뺀 것(겹침 있음): 짝 줄 못 씀(손·직접 경로·영상) {int((~paired).sum())}, 창 안 ok 아닌 줄·앞 줄 모자람 {int((~windowed).sum())},"
+             f"  뺀 것(겹침 있음): 짝 줄 못 씀(손·직접 경로) {int((~paired).sum())}, 창 안 ok 아닌 줄·앞 줄 모자람 {int((~windowed).sum())},"
              f" 정답 거르기 {int((~good).sum())}(손 없음·점수 {joints.MIN_SCORE} 아래 {int((~scored).sum())},"
              f" 손이 둘인 줄 손목 튐 {int((scored & ~marks.valid).sum())},"
              f" 손목–새끼 MCP ±{joints.MAD_LIMIT:g}σ 밖 {int((base & ~good).sum())})"] + filter_lines(p["classId"], base, good, length)
+    if (p["video"] < 0).any():  # 거르지 않고 알리기만 한다(머리말)
+        lines.append(f"  영상 n = 줄 n 아님(pairs.csv video 칸 빔 {int((p['video'] < 0).sum())}줄 — meta video·프레임 수를 볼 것):"
+                     " 정답은 영상 없이 frameNs로 맞추므로 그대로 쓴다")
     if not use.any():
         return None, lines
     y, v9, palmar = joints.targets(marks.world[use], hand)
@@ -195,6 +218,7 @@ def session_data(data, name):
             "flag": p["flag"][use], "edge": p["edge"][use] == 1, "labelled": labelled[use], "v9": v9.astype(np.float32),
             "name": name, "hand": hand, "length_mm": length_mm, "rewear": bool(phone.meta.get("rewear")),
             "wall_ms": hs_io.num(phone.meta.get("start"), "wallMs", np.nan),
+            "inputs": [str((sync.get("inputs") or {}).get(f, "")) for f in verify_sync.INPUTS],
             "label_names": {q["classId"]: q["name"] for q in hs_io.read_prompts(folder)}}
     return part, lines
 
@@ -209,6 +233,8 @@ def merge(parts):
     ds["length_mm"] = np.array([p["length_mm"] for p in parts], dtype=np.float64)
     ds["rewear"] = np.array([p["rewear"] for p in parts], dtype=bool)
     ds["wall_ms"] = np.array([p["wall_ms"] for p in parts], dtype=np.float64)
+    ds["input_files"] = np.array(verify_sync.INPUTS)
+    ds["inputs"] = np.array([p["inputs"] for p in parts])
     names = {}
     for p in parts:
         names.update(p["label_names"])
@@ -341,10 +367,10 @@ def session_split(t_ns, session, wall_ms, rewear, test=None, val=None, fractions
     return tuple(parts), notes, (train, val, test)
 
 
-def save(path, ds):
-    """dataset.npz를 임시 파일에 다 쓴 뒤 이름을 바꾼다."""
+def save(path, ds, with_x=False):
+    """dataset.npz를 임시 파일에 다 쓴 뒤 이름을 바꾼다. 창 x는 with_x일 때만 쓴다(머리말)."""
     tmp = path[: -len(".npz")] + ".tmp.npz"
-    np.savez(tmp, **ds)
+    np.savez(tmp, **{k: v for k, v in ds.items() if with_x or k != "x"})
     os.replace(tmp, path)
 
 
@@ -359,6 +385,7 @@ def main():
     parser.add_argument("sessions", nargs="*", help="폰 세션 이름(없으면 쓸 수 있는 세션 모두)")
     parser.add_argument("--data", default=hs_io.DEFAULT_DATA)
     parser.add_argument("--out", help="dataset.npz 경로(없으면 보고만 하고 쓰지 않음)")
+    parser.add_argument("--save-x", action="store_true", help="창 x도 dataset.npz에 쓴다(세션당 약 170 MB)")
     args = parser.parse_args()
     ds, lines = build(args.data, args.sessions)
     print("\n".join(lines))
@@ -373,8 +400,8 @@ def main():
         how = f"블록 나누기({BLOCK_SEC:g} s 블록, 경계마다 {GAP_SEC:g} s 비움)"
     print(f"모두 {len(ds['y'])}프레임, 세션 {len(ds['sessions'])}개, {how}: 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}")
     if args.out:
-        save(args.out, ds)
-        print(f"저장: {args.out}")
+        save(args.out, ds, with_x=args.save_x)
+        print(f"저장: {args.out}{'' if args.save_x else '(창 x 없이)'}")
     return 0
 
 

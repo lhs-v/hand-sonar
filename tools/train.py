@@ -1,10 +1,10 @@
 """FastViT-T12로 에코 창에서 손 관절 20점을 회귀하고 평가한다(손 소나 계획 4, 학습 설계 §4·§5).
 
     python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 200]
-                             [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [세션 …]
+                             [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--save-x] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
-  report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다.
+  report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다. dataset.npz는 기본으로 창 x 없이 row·목표·라벨·입력 지문만 쓴다(--save-x면 창도).
 - 모델: timm fastvit_t12(처음부터 학습, ImageNet 가중치 없음), 입력 (N, 2, 96, 60), 출력 60값(단위 손 손바닥 틀의 점 1–20).
 - 손실: MSE(60값) + 0.1 × 속도 손실. 속도 손실은 묶음 안 이웃 프레임의 예측 차분과 정답 차분의 MSE다(예측 움직임 자체는 벌하지
   않는다 — 평균 쏠림을 키우지 않게). 미니배치는 연속 프레임 32개 묶음 여럿(모두 256프레임 안팎)이다. 덩어리(세션이 같고 이웃 프레임
@@ -524,6 +524,7 @@ def main():
     parser.add_argument("--offset", type=int, default=0, help="blocks 모드: 고정 무늬(블록 번호 mod 20)를 블록 단위로 돌리는 칸 수")
     parser.add_argument("--test", action="append", metavar="세션", help="session 모드: 시험 세션(여러 번 줄 수 있음. 없으면 다시 찬 세션·마지막 세션)")
     parser.add_argument("--val", action="append", metavar="세션", help="session 모드: 검증 세션(여러 번 줄 수 있음. 없으면 시험이 아닌 가장 늦은 세션)")
+    parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
     ds, lines = dataset.build(args.data, args.sessions)
     print("\n".join(lines))
@@ -549,7 +550,7 @@ def main():
     mix = kind_mix(ds, parts)
     print("\n".join(mix_lines(mix)))
     os.makedirs(folder, exist_ok=True)
-    dataset.save(os.path.join(folder, "dataset.npz"), ds)
+    dataset.save(os.path.join(folder, "dataset.npz"), ds, with_x=args.save_x)
     seed_all(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"{run}: {mode}, 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}프레임, 장치 {device}"
