@@ -76,6 +76,19 @@ class PalmFrameTest(unittest.TestCase):
         np.testing.assert_allclose(bigger, unit, atol=1e-12)
 
 
+class FilterTest(unittest.TestCase):
+    def test_length_filter_scales_mad_to_sigma(self):
+        # 손목–새끼 MCP 길이: 중앙값 80 mm, MAD 정확히 1 mm(−1 mm 200프레임, 0 하나, +1 mm 200프레임), 끝에 ±4 mm·±5 mm 프레임
+        dev = np.r_[np.full(200, -1.0), 0.0, np.full(200, 1.0), [4.0, -4.0, 5.0, -5.0]] * 1e-3
+        world = np.zeros((len(dev), 21, 3))
+        world[:, 17, 1] = 0.080 + dev
+        keep, length = joints.keep_frames(world, np.ones(len(dev)), np.ones(len(dev), dtype=bool))
+        np.testing.assert_allclose(length, 0.080 + dev, atol=1e-15)
+        # σ = 1.4826 MAD = 1.48 mm라 ±3σ = ±4.45 mm: 4 mm는 남고 5 mm는 빠진다(배율 없는 3 MAD ±3 mm였다면 4 mm도 빠짐)
+        np.testing.assert_array_equal(keep[-4:], [True, True, False, False])
+        self.assertTrue(keep[:-4].all())
+
+
 class InstrumentTest(unittest.TestCase):
     def setUp(self):
         _, canon = hands(200, np.random.default_rng(4))

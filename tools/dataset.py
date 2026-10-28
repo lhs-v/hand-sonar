@@ -8,8 +8,9 @@
   상관), 채널 1은 차분이다. 차분 열 j는 원본 줄 j+1의 변화라(pairs.py) 원본 열 r−95…r에 맞는 차분 열은 r−96…r−1이다.
   창마다 채널별로 평균을 빼고 표준편차로 나눈다. 모양 (2, 96, 60).
 - 거르기: pairs.csv hand·direct가 1이고 video 칸이 있으며(영상 n = 줄 n), 창이 쓰는 원본 줄 r−96…r(차분 첫 열이 원본 줄 r−96도 쓰므로
-  97줄)이 모두 rows.npz ok이고, 정답 거르기(joints.keep_frames: 점수·손목 튐·3 MAD)를 지난 프레임만 쓴다. 거울을 되돌린 손에서 엄지가
-  손바닥 쪽인 프레임(joints.thumb_palmar)이 절반 아래인 세션은 손 방향 처리가 틀린 것이라 쓰지 않는다.
+  97줄)이 모두 rows.npz ok이고, 정답 거르기(joints.keep_frames: 점수·손목 튐·길이 ±3σ)를 지난 프레임만 쓴다. 길이 거르기가 동작
+  종류별로 뺀 비율을 보고 줄에 적고, 한 종류가 치우쳐 빠지면(전체 비율의 2배 넘게) 그 사실도 적는다. 거울을 되돌린 손에서 엄지가
+  손바닥 쪽인 프레임(joints.thumb_palmar)이 90% 아래인 세션은 손 방향 처리가 틀렸거나 반쯤 거울인 것이라 쓰지 않는다.
 - 동작 라벨(평가용, 학습 목표 아님): pairs.csv prompt·classId·flag·edge. 라벨로 쓸 줄 = prompt ≥ 0, edge 0, 일시정지 아님,
   flag ≠ wrong(pairs.py와 같은 규칙). 자유 동작(−1)은 라벨이 있는 줄로 친다.
 - 나누기(time_split, 설계 §4): 세션마다 프레임 시각 순서로 앞 70% 학습, 다음 15% 검증, 나머지 시험. 검증·시험은 앞쪽 경계 뒤
@@ -35,7 +36,42 @@ WINDOW = 96  # 창 줄 수(1.2 s)
 BINS = slice(300, 360)  # 칸 300–359(설계 §8: 첫 판은 칸 300을 넣는다)
 SPLIT = (0.70, 0.15, 0.15)  # 학습·검증·시험
 GAP_SEC = 2.0  # 나눈 경계마다 비우는 시간
-MIN_PALMAR = 0.5  # 거울을 되돌린 손에서 엄지가 손바닥 쪽인 프레임 비율 하한(실데이터 99.7%)
+MIN_PALMAR = 0.9  # 거울을 되돌린 손에서 엄지가 손바닥 쪽인 프레임 비율 하한. 20261027-235412는 99.66%(되돌리기 전 0.34%)라 여유가 크고, 0.5면 프레임 40%가 뒤집힌 세션도 지난다
+KINDS = (("finger", "손가락 굽히기"), ("asl", "ASL 숫자"), ("wrist", "손목"), ("free", "자유 동작"))  # 동작 종류: classId 0–4 · 5–14 · 15–17 · −1
+KIND_KEYS = tuple(k for k, _ in KINDS) + ("none",)  # 마지막 none = 라벨 없음(동작 시작 0.5 s·쉬는 때·동작 밖)
+SKEW_RATIO = 2.0  # 길이 거르기가 한 동작 종류에서 전체 비율의 이 배 넘게 빼면 치우쳤다고 알린다(20261027-235412: 손목 10%, 전체 2%)
+SKEW_MIN_FRAMES = 5  # 몇 프레임뿐인 우연은 알리지 않는다
+
+
+def kind_of(class_id, labelled):
+    """프레임마다 동작 종류 번호 (N,): 0 손가락 굽히기(classId 0–4), 1 ASL 숫자(5–14), 2 손목(15–17), 3 자유 동작(−1), 4 라벨 없음."""
+    cid = np.asarray(class_id)
+    return np.where(~np.asarray(labelled, dtype=bool), 4, np.where(cid == -1, 3, np.where(cid >= 15, 2, np.where(cid >= 5, 1, 0))))
+
+
+def filter_lines(class_id, base, good, length):
+    """길이 거르기가 동작 종류별로 뺀 비율을 적은 보고 줄. base = 점수·손목 조건을 지난 프레임, good = 길이까지 지난 프레임.
+    종류는 프레임을 담은 동작 줄로 센다(시작 0.5 s 경계도 그 동작). 한 종류가 치우쳐 빠지면 그 사실을 한 줄 더 적는다."""
+    if not base.any():
+        return []
+    med, sigma = joints.length_limits(length, base)
+    cid = np.asarray(class_id)
+    kind = kind_of(cid, (cid != pairs.NO_CLASS) & (cid != pairs.PAUSE_CLASS))
+    drop = base & ~good
+    total = float(drop.sum() / base.sum())
+    cells, skewed = [], []
+    for k, (_, name) in enumerate(KINDS + (("none", "라벨 없음·쉬는 때"),)):
+        n, d = int((base & (kind == k)).sum()), int((drop & (kind == k)).sum())
+        if n:
+            cells.append(f"{name} {d / n:.1%}({d}/{n})")
+            if d >= SKEW_MIN_FRAMES and d / n >= SKEW_RATIO * total:
+                skewed.append(f"{name} {d / n:.1%}(전체의 {d / n / total:.1f}배)")
+    lines = [f"  손목–새끼 MCP 길이 거르기(중앙값 {med * 1e3:.1f} mm, σ = {joints.MAD_SCALE:g} MAD = {sigma * 1e3:.2f} mm, ±{joints.MAD_LIMIT:g}σ 밖):"
+             f" {int(drop.sum())}프레임({total:.1%}), 동작 종류별 " + " · ".join(cells)]
+    if skewed:
+        lines.append("  치우쳐 빠짐: " + ", ".join(skewed) + " — 그 동작에서 MediaPipe 손 크기(손목–새끼 MCP)가 실제로 흔들린다."
+                     " 단위 손이라 크기 오차는 목표에 해가 없지만 그 동작의 프레임이 줄어든다")
+    return lines
 
 
 def read_pairs(path):
@@ -120,6 +156,7 @@ def session_data(data, name):
         return None, [f"{name}: 건너뜀(pairs.csv와 landmarks.csv의 프레임이 다름 — pairs.py를 다시)"]
     hand = hs_io.read_session(folder).hand
     good, length = joints.keep_frames(marks.world, marks.score, marks.valid)
+    base, _ = joints.scored(marks.world, marks.score, marks.valid)
     paired = (p["hand"] == 1) & (p["direct"] == 1) & (p["video"] >= 0)
     windowed = window_ok(ok, p["row"])
     use = paired & windowed & good
@@ -128,12 +165,13 @@ def session_data(data, name):
              f"  뺀 것(겹침 있음): 짝 줄 못 씀(손·직접 경로·영상) {int((~paired).sum())}, 창 안 ok 아닌 줄·앞 줄 모자람 {int((~windowed).sum())},"
              f" 정답 거르기 {int((~good).sum())}(손 없음·점수 {joints.MIN_SCORE} 아래 {int((~scored).sum())},"
              f" 손이 둘인 줄 손목 튐 {int((scored & ~marks.valid).sum())},"
-             f" 손목–새끼 MCP ±{joints.MAD_LIMIT:g} MAD 밖 {int((scored & marks.valid & ~good).sum())})"]
+             f" 손목–새끼 MCP ±{joints.MAD_LIMIT:g}σ 밖 {int((base & ~good).sum())})"] + filter_lines(p["classId"], base, good, length)
     if not use.any():
         return None, lines
     y, v9, palmar = joints.targets(marks.world[use], hand)
     if palmar < MIN_PALMAR:
-        return None, lines + [f"  건너뜀: 거울을 되돌린 손에서 엄지가 손바닥 쪽인 프레임 {palmar:.1%}(실제 손 모양이 아님 — 거울·손 처리를 볼 것)"]
+        return None, lines + [f"  건너뜀: 거울을 되돌린 손에서 엄지가 손바닥 쪽인 프레임 {palmar:.1%}(문턱 {MIN_PALMAR:.0%}. 실제 손 모양이 아니거나"
+                              " 반쯤 거울 — 거울·손 처리를 볼 것)"]
     labelled = (p["prompt"] >= 0) & (p["edge"] == 0) & (p["classId"] != pairs.PAUSE_CLASS) & (p["flag"] != "wrong")
     length_mm = float(np.median(length[good])) * 1000.0
     lines.append(f"  L(손목–새끼 MCP 중앙값) {length_mm:.1f} mm, 엄지가 손바닥 쪽인 프레임 {palmar:.1%}, 라벨 붙은 프레임 {int((use & labelled).sum())}개")
