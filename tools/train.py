@@ -1,6 +1,7 @@
 """FastViT-T12로 에코 창에서 손 관절 20점을 회귀하고 평가한다(손 소나 계획 4, 학습 설계 §4·§5).
 
-    python -I tools/train.py --mode overfit|time [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 200] [--seed 0] [세션 …]
+    python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 200]
+                             [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
   report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다.
@@ -10,12 +11,23 @@
   간격이 0.2 s 안)마다 묶음 시작을 epoch마다 무작위로 밀고, 묶음 순서를 섞는다.
 - 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
-- 나누기: overfit = 모든 프레임으로 학습·검증·평가(외울 수 있는가), time = dataset.time_split(세션마다 70/15/15, 경계마다 2 s 비움).
+- 나누기(--mode, 없으면 세션이 둘 이상이면 session, 하나면 blocks. 규칙은 dataset 머리말):
+  session = dataset.session_split(세션 단위, 설계 §4): 시험 = 워치를 다시 찬 세션(meta rewear), 없으면 시각 순 마지막 세션(들). 검증 =
+    시험이 아닌 가장 늦은 세션(세션이 둘이면 학습 세션의 끝 15%). --test·--val로 세션을 고를 수 있다. "다른 세션·착용에서도 손 모양이
+    나오는가"에 답하는 나누기다. 세션이 하나면 이유를 적고 멈춘다.
+  blocks = dataset.block_split(10 s 블록을 고정 무늬로 학습·검증·시험에 흩음, 역할이 바뀌는 경계 뒤 2 s 비움. --offset은 무늬를 블록 단위로 돌림).
+    세 자료가 세션 전체(손가락·ASL·손목·자유)에 걸친다. 이웃 블록이 맥락을 나누고 원본 채널이 세션 안 시각을 담고 있어 같은 착용 안의
+    낙관적 상한으로만 읽는다(세션 단위 나누기를 대신하지 못한다).
+  time = dataset.time_split(세션마다 70/15/15, 경계마다 2 s 비움): 세션 안 시간 나누기(낙관적 상한). 안내 시간표가 고정 순서라 시험이
+    늘 자유 동작 꼬리이고, 세션이 여럿이어도 세션마다 이렇게 나눈다.
+  overfit = 모든 프레임으로 학습·검증·평가(외울 수 있는가).
+  나누기마다 프레임 수와 동작 종류 구성(손가락 굽히기·ASL 숫자·손목·자유 동작·라벨 없음)을 출력하고 metrics.json mix·split에 남긴다.
 - 평가(설계 §5, 시험 프레임의 예측·정답, mm = 단위 손 × 세션 L): MPJPE와 움직이는 점 MPJPE, 학습 평균 자세·메도이드 기준선,
   평균 자세 대비 비, 붕괴 비, 뼈 길이 부족(마디별, 평균 자세의 값과 함께), 동작별 MPJPE, ASL-5(숫자 5) 쪽 예측 비율,
   정답 잡음 바닥. 잡음 바닥은 예측이 필요 없어 모든 프레임의 정답으로 잰다(시간 나누기의 시험 구간은 자유 동작뿐이라 2 s 동작이 없다).
-- 그림 report.png 한 장: 시험 구간 처음 30 s의 손끝 셋(엄지·검지·약지) 손목까지 거리(정답·예측·평균 자세) + MPJPE 막대
-  (평균 자세·메도이드·FastViT, 잡음 바닥 선) + 계기 숫자. 영상 프레임이나 사람 모습은 넣지 않는다.
+- 그림 report.png 한 장: 시험 프레임의 손끝 셋(엄지·검지·약지) 손목까지 거리(정답·예측·평균 자세. 블록 나누기는 시험 블록을 이어
+  붙이고, 다른 나누기는 시험 구간 첫 세션의 처음 30 s) + MPJPE 막대(평균 자세·메도이드·FastViT, 잡음 바닥 선) + 계기 숫자 + 세션
+  시간표 띠(동작 종류와 나누기 역할). 영상 프레임이나 사람 모습은 넣지 않는다.
 """
 import argparse
 import os
@@ -27,6 +39,7 @@ import hs_io  # noqa: E402  사용자 설치 numpy·torch·timm 경로도 여기
 import dataset  # noqa: E402
 import joints  # noqa: E402
 import numpy as np  # noqa: E402
+import pairs  # noqa: E402
 import timm  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
@@ -45,6 +58,11 @@ FLOOR_MIN_FRAMES = 5  # 잡음 바닥: 프레임이 이보다 적은 유지 구�
 EXCERPT_SEC = 30.0
 FIG_TIPS = (4, 8, 16)  # 그림의 손끝: 엄지·검지·약지
 SURFACE, INK, INK2, MUTED, GRID, BASE, BLUE = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#2a78d6"
+MODES = ("session", "blocks", "time", "overfit")
+KIND_COLORS = ("#2a9d8f", "#8a6fc4", "#c2548a", "#5b5a56", GRID)  # 동작 종류 넷(dataset.KINDS) + 라벨 없음(그림의 띠)
+ROLE_COLORS = (BASE, "#e3a33b", BLUE)  # 학습 · 검증 · 시험(그림의 띠, dataset.ROLES 순서)
+ROLE_NAMES = ("학습", "검증", "시험")
+GAP_DRAW = 1.0  # 시험 블록을 이어 붙여 그릴 때 블록 사이를 비우는 s
 
 
 def velocity_loss(pred, true, pair):
@@ -146,6 +164,37 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print):
     return model, history, best_epoch
 
 
+def kind_mix(ds, parts):
+    """나누기별 동작 종류 프레임 수 {"train": {"finger": n, "asl": n, "wrist": n, "free": n, "none": n, "total": n}, "val": …, "test": …}.
+    parts는 (학습, 검증, 시험) 프레임 번호. 종류는 라벨 붙은 프레임만 세고 나머지는 none이다."""
+    kind = dataset.kind_of(ds["class_id"], ds["labelled"])
+    return {name: {**{key: int((kind[idx] == k).sum()) for k, key in enumerate(dataset.KIND_KEYS)}, "total": int(len(idx))}
+            for name, idx in zip(dataset.ROLES, parts)}
+
+
+def mix_lines(mix):
+    """kind_mix 결과를 보여 줄 줄(괄호는 그 자료 안 비율)."""
+    out = ["  나누기별 동작 종류 프레임(라벨 붙은 프레임만 종류에 세고, 괄호는 그 자료 안 비율):"]
+    for name, label in zip(dataset.ROLES, ROLE_NAMES):
+        row, total = mix[name], max(mix[name]["total"], 1)
+        cells = [f"{text} {row[key]}({row[key] / total * 100:.0f}%)" for key, text in dataset.KINDS + (("none", "라벨 없음"),)]
+        out.append(f"    {label} {row['total']:>4}프레임: " + " · ".join(cells))
+    return out
+
+
+def block_table(ds, block, role, keep):
+    """블록마다 {session, block, startSec, role, frames, kept, kinds{종류: 쓴 프레임 수}}. 시각은 그 세션의 첫 프레임부터의 s다."""
+    kind = dataset.kind_of(ds["class_id"], ds["labelled"])
+    rows = []
+    for s in np.unique(ds["session"]):
+        for b in np.unique(block[ds["session"] == s]):
+            m = (ds["session"] == s) & (block == b)
+            rows.append({"session": int(s), "block": int(b), "startSec": float(b * dataset.BLOCK_SEC), "role": dataset.ROLES[int(role[m][0])],
+                         "frames": int(m.sum()), "kept": int((m & keep).sum()),
+                         "kinds": {key: int((m & keep & (kind == k)).sum()) for k, key in enumerate(dataset.KIND_KEYS)}})
+    return rows
+
+
 def instruments(ds, pred, train, test):
     """설계 §5 계기 dict. pred (N, 60)는 ds 모든 프레임의 예측이다. 기준선과 ASL-5 평균은 학습 프레임에서, 나머지는 시험 프레임에서 잰다."""
     y = ds["y"].reshape(-1, 20, 3).astype(np.float64)
@@ -174,6 +223,11 @@ def instruments(ds, pred, train, test):
     out["perLabel"] = [{"classId": int(c), "name": names.get(int(c), "?"), "frames": int(m.sum()),
                         "mpjpeMm": float(e_model[m].mean()), "meanPoseMm": float(e_mean[m].mean())}
                        for c in np.unique(cls[labelled]) for m in [labelled & (cls == c)]]
+    kinds = dataset.kind_of(cls, labelled)  # 동작 종류별(손가락·ASL·손목·자유) MPJPE: 시험 프레임 중 그 종류가 없으면 frames 0과 null
+    out["perKind"] = {key: ({"frames": int((kinds == k).sum()), "mpjpeMm": float(e_model[kinds == k].mean()),
+                             "meanPoseMm": float(e_mean[kinds == k].mean()), "ratioToMeanPose": float(e_model[kinds == k].mean() / e_mean[kinds == k].mean())}
+                            if (kinds == k).any() else {"frames": 0, "mpjpeMm": None, "meanPoseMm": None, "ratioToMeanPose": None})
+                      for k, (key, _) in enumerate(dataset.KINDS)}
     five = ds["labelled"][train] & (ds["class_id"][train] == ASL5)
     other = labelled & (cls != ASL5)
     if five.any() and other.any():
@@ -195,39 +249,100 @@ def broken(t, v, gap_sec=CHUNK_GAP_SEC):
     return np.insert(t.astype(np.float64), k, np.nan), np.insert(v.astype(np.float64), k, np.nan)
 
 
-def figure(path, ds, pred, train, test, m, title):
-    """report.png 한 장(왼쪽 손끝 시계열 셋, 오른쪽 MPJPE 막대와 계기 숫자)."""
+def runs(t, v, gap=0.5, pad=0.07):
+    """시각 순서 t(s)와 값 v에서 값이 같고 이웃 간격이 gap(s) 안인 연속 구간 [(시작, 길이, 값)]. 길이는 pad(s)만큼 늘려 한 프레임짜리도 보이게 한다."""
+    t = np.asarray(t, dtype=np.float64)
+    v = np.asarray(v)
+    if len(t) == 0:
+        return []
+    cut = np.flatnonzero((np.diff(v) != 0) | (np.diff(t) > gap)) + 1
+    return [(float(t[a]), float(t[b - 1] - t[a]) + pad, int(v[a])) for a, b in zip(np.r_[0, cut], np.r_[cut, len(t)])]
+
+
+def timeline_strip(ax, ds, parts, session):
+    """세션 시간표 띠 둘(그 세션 첫 프레임부터의 s): 위는 동작 종류(모든 프레임. 쉬는 때는 빈 회색), 아래는 나누기 역할(학습·검증·시험).
+    역할 띠의 빈 곳은 쓰지 않은 프레임(역할이 바뀐 경계 뒤 비움·정답 거르기)이다. 겹치면 시험이 이긴다(과적합 점검은 모두 시험)."""
+    from matplotlib.patches import Patch
+    idx = np.flatnonzero(ds["session"] == session)
+    idx = idx[np.argsort(ds["frame_ns"][idx], kind="stable")]
+    t = (ds["frame_ns"][idx] - ds["frame_ns"][idx[0]]) / 1e9
+    has = (ds["class_id"] != pairs.NO_CLASS) & (ds["class_id"] != pairs.PAUSE_CLASS)  # 동작 안에 든 프레임(경계 0.5 s도 그 동작 종류로 친다)
+    role = np.full(len(ds["y"]), -1)
+    for r, part in enumerate(parts):
+        role[part] = r
+    for y0, values, colors in ((1.2, dataset.kind_of(ds["class_id"], has)[idx], KIND_COLORS), (0.0, role[idx], ROLE_COLORS)):
+        for k, color in enumerate(colors):
+            ax.broken_barh([(a, w) for a, w, v in runs(t, values) if v == k], (y0, 1.0), facecolors=color, edgecolor=SURFACE, linewidth=0.8)
+    for a, w, v in runs(t, dataset.kind_of(ds["class_id"], has)[idx]):  # 대비가 3:1 아래인 칸이 있어 종류 이름을 띠에 직접 쓴다
+        if v < 4 and w >= 8.0:
+            ax.text(a + w / 2, 1.7, dataset.KINDS[v][1], ha="center", va="center", fontsize=8.5, color=INK)
+    ax.set_xlim(0, t[-1] + 0.5)
+    ax.set_ylim(-0.1, 2.3)
+    ax.set_yticks([0.5, 1.7])
+    ax.set_yticklabels(["나누기", "동작 종류"])
+    ax.set_xticks(np.arange(0, t[-1] + 1, 10))
+    ax.set_xlabel(f"세션 {ds['sessions'][session]} 시각(s, 첫 프레임부터. 나누기 띠의 빈 곳 = 경계 뒤 비운 2 s·거른 프레임)")
+    ax.tick_params(axis="y", length=0)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    handles = [Patch(facecolor=c, label=n) for c, n in zip(KIND_COLORS, [k for _, k in dataset.KINDS] + ["라벨 없음·쉬는 때"])]
+    handles += [Patch(facecolor=c, label=n) for c, n in zip(ROLE_COLORS, ROLE_NAMES)]
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.55), ncol=8, fontsize=8.5, frameon=False, handlelength=1.2, columnspacing=1.2)
+
+
+def figure(path, ds, pred, parts, m, title, pieces, labels):
+    """report.png 한 장. 왼쪽 위 세 줄은 시험 프레임 덩어리(pieces)의 손끝 시계열(덩어리가 여럿이면 이어 붙임), 오른쪽은 MPJPE 막대와 계기 숫자,
+    맨 아래는 세션 시간표 띠(동작 종류와 나누기 역할). 영상 프레임이나 사람 모습은 넣지 않는다."""
+    train, val, test = parts
     plt = hs_io.pyplot()
     plt.rcParams.update({"figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE, "axes.edgecolor": BASE,
-                         "axes.labelcolor": INK2, "xtick.color": MUTED, "ytick.color": MUTED, "font.size": 9})
+                         "axes.labelcolor": INK2, "xtick.color": MUTED, "ytick.color": MUTED, "font.size": 9, "text.color": INK})
     y = ds["y"].reshape(-1, 20, 3)
     p = np.asarray(pred).reshape(-1, 20, 3)
     mean = joints.mean_pose(y[train])
-    order = np.asarray(test)[np.lexsort((ds["frame_ns"][test], ds["session"][test]))]
-    order = order[ds["session"][order] == ds["session"][order[0]]]  # 시험 구간의 첫 세션
-    t = (ds["frame_ns"][order] - ds["frame_ns"][order[0]]) / 1e9
-    order, t = order[t <= EXCERPT_SEC], t[t <= EXCERPT_SEC]
-    scale = float(ds["length_mm"][ds["session"][order[0]]])
-    fig = plt.figure(figsize=(13.5, 7.4), constrained_layout=True)
-    grid = fig.add_gridspec(3, 2, width_ratios=[2.2, 1.0])
+    session = int(ds["session"][pieces[0][0]])
+    scale = float(ds["length_mm"][session])
+    xs, spans, x0 = [], [], 0.0  # 덩어리마다 시작 시각을 0으로 두고 GAP_DRAW만큼 띄워 이어 붙인 가로 자리
+    for piece in pieces:
+        tt = (ds["frame_ns"][piece] - ds["frame_ns"][piece[0]]) / 1e9
+        xs.append(tt + x0)
+        spans.append((x0, x0 + float(tt[-1])))
+        x0 += float(tt[-1]) + GAP_DRAW
+    many = len(pieces) > 1
+    fig = plt.figure(figsize=(13.5, 8.9), constrained_layout=True)
+    grid = fig.add_gridspec(4, 2, width_ratios=[2.2, 1.0], height_ratios=[1, 1, 1, 0.62])
     names = {tip: name for name, idx in joints.FINGERS for tip in idx[-1:]}
+    first = None
     for row, tip in enumerate(FIG_TIPS):
-        ax = fig.add_subplot(grid[row, 0])
+        ax = fig.add_subplot(grid[row, 0], sharex=first)
+        first = first or ax
         ax.axhline(float(np.linalg.norm(mean[tip - 1])) * scale, color=MUTED, lw=1.0, ls="--", label="평균 자세(학습)")
-        for q, color, label in ((y, INK, "정답(MediaPipe)"), (p, BLUE, "FastViT 예측")):
-            ax.plot(*broken(t, np.linalg.norm(q[order, tip - 1], axis=1) * scale), color=color, lw=1.3, label=label)
+        for k, (piece, x) in enumerate(zip(pieces, xs)):
+            for q, color, label in ((y, INK, "정답(MediaPipe)"), (p, BLUE, "FastViT 예측")):
+                ax.plot(*broken(x, np.linalg.norm(q[piece, tip - 1], axis=1) * scale), color=color, lw=1.3, label=label if k == 0 else None)
+        for (_, a), (b, _) in zip(spans[:-1], spans[1:]):  # 덩어리 사이 구분선
+            ax.axvline((a + b) / 2, color=BASE, lw=1.0, ls=":")
         ax.set_ylabel(f"{names[tip]} 끝–손목(mm)")
         ax.grid(axis="y", color=GRID, lw=0.7)
+        ax.set_xlim(-0.3, spans[-1][1] + 0.3)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         if row == 0:
-            ax.legend(loc="upper right", ncol=3, fontsize=8.5, frameon=False)
-            ax.set_title(f"시험 구간 처음 {t[-1]:.0f} s(손바닥 틀, 단위 손 × L {scale:.1f} mm)", loc="left", fontsize=10, color=INK)
-    ax.set_xlabel("시험 구간 시작부터의 시간(s)")
+            ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=3, fontsize=8.5, frameon=False)  # 자료를 가리지 않게 그림 위쪽 바깥에 둔다
+            head = (f"시험 블록 {len(pieces)}개 이어 붙임(단위 손 × L {scale:.1f} mm)" if many
+                    else f"시험 구간 처음 {spans[0][1]:.0f} s(단위 손 × L {scale:.1f} mm)")
+            ax.set_title(head, loc="left", fontsize=10, color=INK)
+        if row < len(FIG_TIPS) - 1:
+            ax.tick_params(labelbottom=False)
+    if many:
+        ax.set_xticks([(a + b) / 2 for a, b in spans])
+        ax.set_xticklabels(labels, fontsize=8.5, color=INK2)
+    else:
+        ax.set_xlabel("시험 구간 시작부터의 시간(s)")
     ax = fig.add_subplot(grid[0, 1])
-    labels = ["평균 자세", "메도이드", "FastViT"]
+    bar_names = ["평균 자세", "메도이드", "FastViT"]
     values = [m["baselines"]["meanPoseMm"], m["baselines"]["medoidMm"], m["mpjpeMm"]]
-    bars = ax.bar(labels, values, color=[BASE, BASE, BLUE], width=0.6)
+    bars = ax.bar(bar_names, values, color=[BASE, BASE, BLUE], width=0.6)
     for b, v in zip(bars, values):
         ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}", ha="center", va="bottom", fontsize=9, color=INK)
     if m["noiseFloorMm"] is not None:
@@ -237,7 +352,7 @@ def figure(path, ds, pred, train, test, m, title):
     ax.set_ylim(0, max(values) * 1.18)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax = fig.add_subplot(grid[1:, 1])
+    ax = fig.add_subplot(grid[1:3, 1])
     ax.axis("off")
     c, s = m["collapse"], m["boneShortfallPercent"]
     text = [f"평균 자세 대비 비  {m['ratioToMeanPose']:.2f}",
@@ -250,13 +365,38 @@ def figure(path, ds, pred, train, test, m, title):
     if "asl5Closer" in m:
         a = m["asl5Closer"]
         text.append(f"정답보다 ASL-5 평균에 가까운 예측 {a['model'] * 100:.0f}%(평균 자세 {a['meanPose'] * 100:.0f}%, {a['frames']}프레임)")
+    cells = [f"{name} {m['perKind'][key]['mpjpeMm']:.1f}({m['perKind'][key]['meanPoseMm']:.1f})" if m["perKind"][key]["frames"] else f"{name} 없음"
+             for key, name in dataset.KINDS]
+    text += ["동작 종류별 시험 MPJPE(mm), FastViT(평균 자세)", "  " + " · ".join(cells[:2]), "  " + " · ".join(cells[2:])]
     text.append(f"학습 {m['frames']['train']} · 검증 {m['frames']['val']} · 시험 {m['frames']['test']}프레임, epoch {m['bestEpoch']}/{m['epochs']}")
+    step = min(0.085, 0.97 / len(text))
     for k, line in enumerate(text):
-        ax.text(0.0, 1.0 - k * 0.085, line, transform=ax.transAxes, va="top", fontsize=11 if k == 0 else 9,
+        ax.text(0.0, 1.0 - k * step, line, transform=ax.transAxes, va="top", fontsize=11 if k == 0 else 9,
                 fontweight="bold" if k == 0 else "normal", color=INK if k == 0 else INK2)
+    timeline_strip(fig.add_subplot(grid[3, :]), ds, parts, session)
     fig.suptitle(title, x=0.01, ha="left", fontsize=12, fontweight="bold", color=INK)
     fig.savefig(path, dpi=110)
     plt.close(fig)
+
+
+def figure_pieces(ds, test, block=None):
+    """그림에 그릴 시험 프레임 덩어리 [(프레임 번호, 시각 순서)]와 이름. block (N,)이 없으면 시험 구간 첫 세션의 처음 EXCERPT_SEC s 하나,
+    있으면(블록 나누기) 시험 블록마다 하나다(그 블록의 쓴 프레임 전부)."""
+    test = np.asarray(test)
+    order = test[np.lexsort((ds["frame_ns"][test], ds["session"][test]))]
+    order = order[ds["session"][order] == ds["session"][order[0]]]  # 시험 구간의 첫 세션
+    if block is None:
+        t = (ds["frame_ns"][order] - ds["frame_ns"][order[0]]) / 1e9
+        return [order[t <= EXCERPT_SEC]], [None]
+    kind = dataset.kind_of(ds["class_id"], ds["labelled"])
+    pieces, labels = [], []
+    for b in np.unique(block[order]):
+        piece = order[block[order] == b]
+        count = np.bincount(kind[piece], minlength=5)[:4]
+        main = [dataset.KINDS[k][1] for k in np.argsort(-count, kind="stable") if count[k] > 0 and count[k] >= 0.2 * count.sum()]
+        labels.append(f"블록 {b} · {b * dataset.BLOCK_SEC:.0f}–{(b + 1) * dataset.BLOCK_SEC:.0f} s\n" + (" + ".join(main) or "라벨 없음"))
+        pieces.append(piece)
+    return pieces, labels
 
 
 def report(m):
@@ -273,41 +413,106 @@ def report(m):
     if m["noiseFloorMm"] is not None:
         lines.append(f"  정답 잡음 바닥 {m['noiseFloorMm']:.2f} mm({m['noiseFloorFrames']}프레임)")
     lines.append("  동작별 MPJPE(mm, 평균 자세): " + ", ".join(f"{r['name']} {r['mpjpeMm']:.1f}({r['meanPoseMm']:.1f}, {r['frames']})" for r in m["perLabel"]))
+    lines.append("  동작 종류별 MPJPE(mm, 평균 자세, 비, 프레임): " + ", ".join(
+        f"{text} {k['mpjpeMm']:.1f}({k['meanPoseMm']:.1f}, {k['ratioToMeanPose']:.2f}, {k['frames']})" if k["frames"] else f"{text} 시험에 없음"
+        for key, text in dataset.KINDS for k in [m["perKind"][key]]))
     lines.append(f"  나누기별 MPJPE: " + ", ".join(f"{k} {v:.2f} mm" for k, v in m["splitMpjpeMm"].items()))
     return lines
+
+
+def split_frames(ds, mode, args):
+    """나누기: ((학습, 검증, 시험) 프레임 번호, 블록 번호 (N,) 또는 None, metrics.json split, 그림 제목의 설명, 출력 줄). 나눌 수 없으면 ValueError."""
+    n = len(ds["y"])
+    block, split, lines = None, {}, []
+    if mode == "overfit":
+        return (np.arange(n),) * 3, None, split, "과적합 점검(모든 프레임으로 학습·평가)", lines
+    if mode == "time":
+        if len(ds["sessions"]) > 1:
+            lines.append("세션이 여럿인데 time: 세션마다 70/15/15라 시험이 모두 시간표 끝(자유 동작)이다 — 세션 단위로 견주려면 --mode session")
+        split = {"fractions": list(dataset.SPLIT), "gapSec": dataset.GAP_SEC}
+        return (dataset.time_split(ds["frame_ns"], ds["session"]), None, split,
+                "세션 안 시간 나누기(낙관적 상한: 앞 70% 학습 · 15% 검증 · 끝 15% 시험, 경계 2 s 비움)", lines)
+    if mode == "blocks":
+        block, role, keep = dataset.block_assign(ds["frame_ns"], ds["session"], offset=args.offset)
+        train, val, test = dataset.block_split(ds["frame_ns"], ds["session"], offset=args.offset)
+        table = block_table(ds, block, role, keep)
+        dropped = {name: int(((role == r) & ~keep).sum()) for r, name in enumerate(dataset.ROLES)}
+        used = len(train) + len(val) + len(test)
+        lines += [f"블록 나누기: {dataset.BLOCK_SEC:g} s 블록 {len(table)}개, 무늬 offset {args.offset}(블록 번호 mod {dataset.BLOCK_PERIOD},"
+                  f" 시험 자리 {list(dataset.BLOCK_TEST)} · 검증 자리 {list(dataset.BLOCK_VAL)}), 역할이 바뀐 경계 뒤 {dataset.GAP_SEC:g} s 비움",
+                  "  블록별 역할(학=학습 검=검증 시=시험): " + " ".join(f"{r['block']}{ROLE_NAMES[dataset.ROLES.index(r['role'])][0]}" for r in table),
+                  f"  쓴 프레임 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}(전체 {n}, 비운 프레임 학습 {dropped['train']} · 검증 {dropped['val']}"
+                  f" · 시험 {dropped['test']}), 쓴 프레임 중 비율 {len(train) / used:.0%}/{len(val) / used:.0%}/{len(test) / used:.0%}",
+                  "  시험 블록: " + ", ".join(f"{r['block']}번({r['startSec']:.0f}–{r['startSec'] + dataset.BLOCK_SEC:.0f} s)" for r in table if r["role"] == "test")
+                  + " / 검증 블록: " + ", ".join(f"{r['block']}번({r['startSec']:.0f}–{r['startSec'] + dataset.BLOCK_SEC:.0f} s)" for r in table if r["role"] == "val")]
+        split = {"blockSec": dataset.BLOCK_SEC, "period": dataset.BLOCK_PERIOD, "offset": args.offset, "testSlots": list(dataset.BLOCK_TEST),
+                 "valSlots": list(dataset.BLOCK_VAL), "gapSec": dataset.GAP_SEC, "droppedFrames": dropped, "blocks": table}
+        what = (f"블록 나누기(같은 착용 안 낙관적 상한: 10 s 블록을 고정 무늬로 학습 14 · 검증 3 · 시험 3자리에 흩음, offset {args.offset},"
+                " 경계 뒤 2 s 비움)")
+        return (train, val, test), block, split, what, lines
+    names = ds["sessions"].tolist()
+
+    def pick(given):
+        if not given:
+            return None
+        missing = [g for g in given if g not in names]
+        if missing:
+            raise ValueError(f"자료에 없는 세션 {', '.join(missing)}(쓴 세션: {', '.join(names)})")
+        return [names.index(g) for g in given]
+
+    parts, notes, sets = dataset.session_split(ds["frame_ns"], ds["session"], ds["wall_ms"], ds["rewear"], test=pick(args.test), val=pick(args.val))
+    by_name = [[names[s] for s in group] for group in sets]
+    lines += ["세션 나누기: " + " · ".join(f"{label} {', '.join(group) or '없음'}" for label, group in zip(ROLE_NAMES, by_name))]
+    lines += ["  " + note for note in notes]
+    split = {"train": by_name[0], "val": by_name[1], "test": by_name[2], "valFromTrainTail": not sets[1], "notes": notes}
+    what = f"세션 나누기(학습 {len(sets[0])} · 검증 {len(sets[1]) if sets[1] else '학습 세션 끝 15%'} · 시험 {len(sets[2])}세션)"
+    return parts, None, split, what, lines
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="FastViT-T12로 에코 창에서 손 관절 20점을 학습·평가한다")
     parser.add_argument("sessions", nargs="*", help="폰 세션 이름(없으면 쓸 수 있는 세션 모두)")
-    parser.add_argument("--mode", choices=("overfit", "time"), required=True, help="overfit: 모든 프레임으로 학습·평가, time: 시간 나누기")
+    parser.add_argument("--mode", choices=MODES,
+                        help="session: 세션 단위, blocks: 10 s 블록을 흩어 나누기, time: 세션 안 시간 나누기, overfit: 모든 프레임으로 학습·평가"
+                             "(없으면 세션이 둘 이상이면 session, 하나면 blocks)")
     parser.add_argument("--run", help="실행 이름(없으면 <날짜-시각>-<mode>)")
     parser.add_argument("--data", default=hs_io.DEFAULT_DATA)
     parser.add_argument("--out", help="학습 결과를 둘 폴더(없으면 <data>/processed/training)")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="최대 epoch")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--offset", type=int, default=0, help="blocks 모드: 고정 무늬(블록 번호 mod 20)를 블록 단위로 돌리는 칸 수")
+    parser.add_argument("--test", action="append", metavar="세션", help="session 모드: 시험 세션(여러 번 줄 수 있음. 없으면 다시 찬 세션·마지막 세션)")
+    parser.add_argument("--val", action="append", metavar="세션", help="session 모드: 검증 세션(여러 번 줄 수 있음. 없으면 시험이 아닌 가장 늦은 세션)")
     args = parser.parse_args()
-    run = args.run or f"{time.strftime('%Y%m%d-%H%M%S')}-{args.mode}"
-    folder = os.path.join(args.out or os.path.join(args.data, "processed", "training"), run)
     ds, lines = dataset.build(args.data, args.sessions)
     print("\n".join(lines))
     if ds is None:
         print("쓸 세션이 없음")
         return 1
     n = len(ds["y"])
-    if args.mode == "overfit":
-        train = val = test = np.arange(n)
-    else:
-        train, val, test = dataset.time_split(ds["frame_ns"], ds["session"])
+    mode = args.mode or ("session" if len(ds["sessions"]) >= 2 else "blocks")
+    if not args.mode:
+        print(f"나누기 {mode}(--mode 없음: 세션 {len(ds['sessions'])}개 — 둘 이상이면 session, 하나면 blocks)")
+    run = args.run or f"{time.strftime('%Y%m%d-%H%M%S')}-{mode}"
+    folder = os.path.join(args.out or os.path.join(args.data, "processed", "training"), run)
+    try:
+        parts, block, split, what, lines = split_frames(ds, mode, args)
+    except ValueError as e:
+        print(f"나누지 못함: {e}")
+        return 1
+    print("\n".join(lines))
+    train, val, test = parts
     if min(len(train), len(val), len(test)) == 0:
         print(f"나눈 자료가 비었음(학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)})")
         return 1
+    mix = kind_mix(ds, parts)
+    print("\n".join(mix_lines(mix)))
     os.makedirs(folder, exist_ok=True)
     dataset.save(os.path.join(folder, "dataset.npz"), ds)
     seed_all(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"{run}: {args.mode}, 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}프레임, 장치 {device}"
+    print(f"{run}: {mode}, 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}프레임, 장치 {device}"
           f"{'(' + torch.cuda.get_device_name(0) + ')' if device == 'cuda' else ' — GPU가 없어 아주 느리다'}")
     x = torch.as_tensor(ds["x"], device=device)
     y = torch.as_tensor(ds["y"], device=device)
@@ -321,16 +526,18 @@ def main():
     mm = ds["length_mm"][ds["session"]]
     m["splitMpjpeMm"] = {k: float(np.mean(joints.frame_errors(pred.reshape(-1, 20, 3)[v], yy[v]) * mm[v]))
                          for k, v in (("train", train), ("val", val), ("test", test))}
-    m.update({"format": 1, "run": run, "mode": args.mode, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
+    m.update({"format": 1, "run": run, "mode": mode, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
               "frames": {"train": int(len(train)), "val": int(len(val)), "test": int(len(test))}, "seed": args.seed,
               "epochs": len(history), "maxEpochs": args.epochs, "bestEpoch": best_epoch, "trainSeconds": seconds,
-              "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history})
+              "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history, "mix": mix, "split": split})
     torch.save({"arch": ARCH, "in_chans": 2, "num_classes": 60, "bins": [dataset.BINS.start, dataset.BINS.stop], "window": dataset.WINDOW,
-                "mode": args.mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "state_dict": model.state_dict()},
+                "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "state_dict": model.state_dict()},
                os.path.join(folder, "model.pt"))
     hs_io.write_json(os.path.join(folder, "metrics.json"), m)
-    what = "과적합 점검(모든 프레임으로 학습·평가)" if args.mode == "overfit" else "시간 나누기(앞 70% 학습 · 15% 검증 · 끝 15% 시험, 경계 2 s 비움)"
-    figure(os.path.join(folder, "report.png"), ds, pred, train, test, m, f"{run}: {what} — 세션 {', '.join(m['sessions'])}")
+    names = m["sessions"]
+    which = ", ".join(names) if len(names) <= 3 else f"{len(names)}개({names[0]} … {names[-1]})"
+    pieces, piece_labels = figure_pieces(ds, test, block)
+    figure(os.path.join(folder, "report.png"), ds, pred, parts, m, f"{run}: {what} — 세션 {which}", pieces, piece_labels)
     print("\n".join([f"{run}: {len(history)} epoch, {seconds / 60:.1f}분, 최고 epoch {best_epoch}"] + report(m)))
     print(f"결과: {folder}")
     return 0

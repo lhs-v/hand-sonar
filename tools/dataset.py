@@ -13,12 +13,21 @@
   손바닥 쪽인 프레임(joints.thumb_palmar)이 90% 아래인 세션은 손 방향 처리가 틀렸거나 반쯤 거울인 것이라 쓰지 않는다.
 - 동작 라벨(평가용, 학습 목표 아님): pairs.csv prompt·classId·flag·edge. 라벨로 쓸 줄 = prompt ≥ 0, edge 0, 일시정지 아님,
   flag ≠ wrong(pairs.py와 같은 규칙). 자유 동작(−1)은 라벨이 있는 줄로 친다.
-- 나누기(time_split, 설계 §4): 세션마다 프레임 시각 순서로 앞 70% 학습, 다음 15% 검증, 나머지 시험. 검증·시험은 앞쪽 경계 뒤
-  2 s 안의 프레임을 버린다(창 1.2 s가 앞쪽 정답 시각과 겹치지 않게).
+- 나누기(설계 §4). 셋 다 (학습, 검증, 시험) 프레임 번호를 세션·시각 순서로 낸다.
+  - session_split(세션 단위): 시험 = meta.json rewear가 참인 세션(워치를 다시 찬 세션). 그런 세션이 없거나 모든 세션이면 시각
+    (meta start wallMs) 순으로 마지막 max(1, round(0.15 × 세션 수))세션. 검증 = 시험이 아닌 세션 중 가장 늦은 하나. 시험이 아닌 세션이
+    하나뿐이면(세션 둘) 검증 세션을 따로 둘 수 없어 학습 세션의 끝 15%(앞 2 s 비움)를 검증으로 쓴다. 학습 = 나머지. 시험·검증 세션을
+    직접 고를 수도 있다. 세션이 하나면 나누지 못한다(ValueError). 지금 폰 앱은 rewear를 늘 false로 적는다(다시 차기 안내가 아직 없음).
+  - block_split(세션 안, 실험용): 세션 시간표를 10 s 블록으로 자르고 블록 번호 mod 20(+offset)으로 학습 14 · 검증 3 · 시험 3자리를 고정
+    무늬로 흩어 놓는다(세 자료가 세션 전체에 걸침). 역할이 바뀌는 모든 경계 뒤 2 s를 비운다(시험 → 학습 경계도). 같은 착용 안의
+    낙관적 상한이다: 원본 채널이 세션 안 시각을 담고 있어 학습 블록 사이에 낀 시험 블록은 표류를 보간할 수 있다.
+  - time_split(세션 안): 세션마다 프레임 시각 순서로 앞 70% 학습, 다음 15% 검증, 나머지 시험. 검증·시험은 앞쪽 경계 뒤 2 s 안의
+    프레임을 버린다(창 1.2 s가 앞쪽 정답 시각과 겹치지 않게). 안내 시간표가 고정 순서라 시험은 늘 자유 동작 꼬리다.
 dataset.npz(allow_pickle 없이 읽힘): x (N, 2, 96, 60) float32, y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), sessions·hands (S,) 문자열,
-length_mm (S,) float64(세션의 L), label_ids (K,) int16, label_names (K,) 문자열.
+length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
+label_names (K,) 문자열.
 """
 import argparse
 import csv
@@ -41,6 +50,11 @@ KINDS = (("finger", "손가락 굽히기"), ("asl", "ASL 숫자"), ("wrist", "�
 KIND_KEYS = tuple(k for k, _ in KINDS) + ("none",)  # 마지막 none = 라벨 없음(동작 시작 0.5 s·쉬는 때·동작 밖)
 SKEW_RATIO = 2.0  # 길이 거르기가 한 동작 종류에서 전체 비율의 이 배 넘게 빼면 치우쳤다고 알린다(20261027-235412: 손목 10%, 전체 2%)
 SKEW_MIN_FRAMES = 5  # 몇 프레임뿐인 우연은 알리지 않는다
+BLOCK_SEC = 10.0  # 블록 나누기: 세션 시간표를 이 길이의 블록으로 자른다
+BLOCK_PERIOD = 20  # 블록 번호 mod 20(+offset)으로 역할을 정한다: 학습 14 · 검증 3 · 시험 3자리 = 70/15/15
+BLOCK_TEST = (0, 7, 14)  # 시험 자리: 20블록 안에 고르게 흩어짐(7·7·6칸 간격). 이 세션(22블록)에서는 자리 0이 두 번(블록 0·20) 나와 시험 4블록
+BLOCK_VAL = (3, 10, 17)  # 검증 자리: 시험 사이사이(3·4·3·4·3·3칸 간격으로 시험·검증이 번갈아 놓임)
+ROLES = ("train", "val", "test")  # block_assign의 역할 번호 0·1·2
 
 
 def kind_of(class_id, labelled):
@@ -154,7 +168,8 @@ def session_data(data, name):
     marks = hs_io.read_landmarks(folder)
     if not np.array_equal(marks.frame_ns, p["frameNs"]):
         return None, [f"{name}: 건너뜀(pairs.csv와 landmarks.csv의 프레임이 다름 — pairs.py를 다시)"]
-    hand = hs_io.read_session(folder).hand
+    phone = hs_io.read_session(folder)
+    hand = phone.hand
     good, length = joints.keep_frames(marks.world, marks.score, marks.valid)
     base, _ = joints.scored(marks.world, marks.score, marks.valid)
     paired = (p["hand"] == 1) & (p["direct"] == 1) & (p["video"] >= 0)
@@ -178,7 +193,8 @@ def session_data(data, name):
     part = {"x": windows(raw, diff, p["row"][use]), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
             "row": p["row"][use], "prompt": p["prompt"][use].astype(np.int32), "class_id": p["classId"][use].astype(np.int16),
             "flag": p["flag"][use], "edge": p["edge"][use] == 1, "labelled": labelled[use], "v9": v9.astype(np.float32),
-            "name": name, "hand": hand, "length_mm": length_mm,
+            "name": name, "hand": hand, "length_mm": length_mm, "rewear": bool(phone.meta.get("rewear")),
+            "wall_ms": hs_io.num(phone.meta.get("start"), "wallMs", np.nan),
             "label_names": {q["classId"]: q["name"] for q in hs_io.read_prompts(folder)}}
     return part, lines
 
@@ -191,6 +207,8 @@ def merge(parts):
     ds["sessions"] = np.array([p["name"] for p in parts])
     ds["hands"] = np.array([p["hand"] for p in parts])
     ds["length_mm"] = np.array([p["length_mm"] for p in parts], dtype=np.float64)
+    ds["rewear"] = np.array([p["rewear"] for p in parts], dtype=bool)
+    ds["wall_ms"] = np.array([p["wall_ms"] for p in parts], dtype=np.float64)
     names = {}
     for p in parts:
         names.update(p["label_names"])
@@ -238,6 +256,91 @@ def time_split(t_ns, session, fractions=SPLIT, gap_sec=GAP_SEC):
     return tuple(np.concatenate(o).astype(np.int64) for o in out)
 
 
+def block_roles(count, offset=0):
+    """블록 번호 0…count−1의 역할 (count,) int8: 0 학습, 1 검증, 2 시험. 자리 = (블록 번호 + offset) mod BLOCK_PERIOD가 BLOCK_TEST·BLOCK_VAL에
+    들면 시험·검증, 아니면 학습이다(고정 무늬라 씨앗값이 없다. offset은 무늬를 블록 단위로 돌린다)."""
+    slot = (np.arange(count) + int(offset)) % BLOCK_PERIOD
+    return np.where(np.isin(slot, BLOCK_TEST), 2, np.where(np.isin(slot, BLOCK_VAL), 1, 0)).astype(np.int8)
+
+
+def block_assign(t_ns, session, block_sec=BLOCK_SEC, offset=0, gap_sec=GAP_SEC):
+    """블록 나누기의 프레임별 배정: (블록 번호 (N,) int64, 역할 (N,) int8, 쓸 프레임 (N,) bool). 세션마다 그 세션의 첫 프레임 시각부터 block_sec 길이로 자르고,
+    역할이 앞 블록과 달라진 블록은 시작 뒤 gap_sec 안의 프레임을 쓰지 않는다(time_split이 경계 뒤 2 s를 비우는 것과 같은 규칙. 창 1.2 s가
+    다른 쪽 자료에 걸치지 않게). 세션의 첫 블록은 앞이 없어 비우지 않는다."""
+    t_ns = np.asarray(t_ns, dtype=np.int64)
+    session = np.asarray(session)
+    block = np.zeros(len(t_ns), dtype=np.int64)
+    role = np.zeros(len(t_ns), dtype=np.int8)
+    keep = np.ones(len(t_ns), dtype=bool)
+    for s in np.unique(session):
+        idx = np.flatnonzero(session == s)
+        sec = (t_ns[idx] - t_ns[idx].min()) / 1e9
+        b = np.floor(sec / block_sec).astype(np.int64)
+        roles = block_roles(int(b.max()) + 1, offset)
+        changed = np.r_[False, roles[1:] != roles[:-1]][b]  # 앞 블록과 역할이 다른 블록의 프레임
+        block[idx], role[idx] = b, roles[b]
+        keep[idx] = ~(changed & (sec - b * block_sec < gap_sec))
+    return block, role, keep
+
+
+def block_split(t_ns, session, block_sec=BLOCK_SEC, offset=0, gap_sec=GAP_SEC):
+    """(학습, 검증, 시험) 프레임 번호, 각각 세션·시각 순서(time_split과 같은 모양). 10 s 블록을 고정 무늬로 학습·검증·시험에 흩어 놓아
+    세 자료가 세션 전체에 걸친다. 역할이 바뀌는 경계 뒤 gap_sec의 프레임은 버린다(block_assign)."""
+    block, role, keep = block_assign(t_ns, session, block_sec, offset, gap_sec)
+    order = np.lexsort((np.asarray(t_ns), np.asarray(session)))
+    return tuple(order[keep[order] & (role[order] == r)].astype(np.int64) for r in range(3))
+
+
+def session_split(t_ns, session, wall_ms, rewear, test=None, val=None, fractions=SPLIT, gap_sec=GAP_SEC):
+    """세션 단위 나누기(머리말): ((학습, 검증, 시험) 프레임 번호, 알릴 줄, (학습, 검증, 시험) 세션 번호 목록(각각 시각 순서)).
+    wall_ms·rewear (S,)는 세션마다 시작 시각과 다시 찬 표시다. test·val(세션 번호 목록)을 주면 그대로 쓰고, 주지 않은 쪽은 규칙을 따른다.
+    검증 세션이 빈 목록이면 학습 세션마다 끝 fractions[1]을 검증으로 쓴다(앞 gap_sec 비움). 나눌 수 없으면 ValueError(이유)."""
+    t_ns = np.asarray(t_ns, dtype=np.int64)
+    session = np.asarray(session)
+    count = len(wall_ms)
+    if count < 2:
+        raise ValueError(f"세션이 {count}개뿐이라 세션 단위로 나눌 수 없음 — 세션을 더 모으거나 --mode blocks(같은 착용 안 낙관적 상한)로")
+    order = [int(s) for s in np.argsort(np.asarray(wall_ms, dtype=np.float64), kind="stable")]  # 시각 순서
+    fixed_val = [int(s) for s in (val or [])]
+    notes = []
+    if test is None:
+        pool = [s for s in order if s not in fixed_val]
+        marked = [s for s in pool if rewear[s]]
+        if marked and len(marked) < len(pool):
+            test = marked
+            notes.append(f"시험 = 워치를 다시 찬 세션(meta rewear) {len(marked)}개")
+        else:
+            k = max(1, int(round(fractions[2] * count)))
+            test = pool[-k:]
+            notes.append(("모든 세션에 다시 찬 표시(meta rewear)가 있어" if marked else "다시 찬 표시(meta rewear)가 있는 세션이 없어")
+                         + f" 시각 순 마지막 {k}세션(세션 수의 {fractions[2]:.0%}, 적어도 하나)을 시험으로")
+    test = [s for s in order if s in [int(v) for v in test]]
+    if set(test) & set(fixed_val):
+        raise ValueError("같은 세션을 시험과 검증에 함께 둘 수 없음")
+    rest = [s for s in order if s not in test and s not in fixed_val]
+    val = [s for s in order if s in fixed_val] if val is not None else rest[-1:] if len(rest) >= 2 else []
+    train = [s for s in order if s not in test and s not in val]
+    if not train:
+        raise ValueError("학습에 남는 세션이 없음")
+
+    def frames(sets):
+        idx = np.flatnonzero(np.isin(session, sets))
+        return idx[np.lexsort((t_ns[idx], session[idx]))].astype(np.int64)
+
+    parts = [frames(train), frames(val), frames(test)]
+    if not val:
+        notes.append(f"시험이 아닌 세션이 하나뿐이라 검증은 학습 세션의 끝 {fractions[1]:.0%}(앞 {gap_sec:g} s 비움) — 검증 손실이 같은 세션 안이라 낙관적이다")
+        keep, held = [], []
+        for s in train:
+            idx = frames([s])
+            t = t_ns[idx]
+            k = min(int(round((1.0 - fractions[1]) * len(idx))), len(idx) - 1)
+            keep.append(idx[:k])
+            held.append(idx[t >= t[k] + gap_sec * 1e9])
+        parts[0], parts[1] = np.concatenate(keep), np.concatenate(held)
+    return tuple(parts), notes, (train, val, test)
+
+
 def save(path, ds):
     """dataset.npz를 임시 파일에 다 쓴 뒤 이름을 바꾼다."""
     tmp = path[: -len(".npz")] + ".tmp.npz"
@@ -262,8 +365,13 @@ def main():
     if ds is None:
         print("쓸 세션이 없음")
         return 1
-    train, val, test = time_split(ds["frame_ns"], ds["session"])
-    print(f"모두 {len(ds['y'])}프레임, 시간 나누기 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}(경계마다 {GAP_SEC:g} s 비움)")
+    if len(ds["sessions"]) >= 2:  # train.py의 기본 나누기
+        (train, val, test), notes, _ = session_split(ds["frame_ns"], ds["session"], ds["wall_ms"], ds["rewear"])
+        how = "세션 나누기(" + "; ".join(notes) + ")"
+    else:
+        train, val, test = block_split(ds["frame_ns"], ds["session"])
+        how = f"블록 나누기({BLOCK_SEC:g} s 블록, 경계마다 {GAP_SEC:g} s 비움)"
+    print(f"모두 {len(ds['y'])}프레임, 세션 {len(ds['sessions'])}개, {how}: 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}")
     if args.out:
         save(args.out, ds)
         print(f"저장: {args.out}")
