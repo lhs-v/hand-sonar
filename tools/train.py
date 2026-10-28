@@ -540,7 +540,7 @@ def main():
     parser.add_argument("--max-minutes", type=float, default=MAX_MINUTES, help="학습 벽시계 상한(분). 넘으면 그 epoch 뒤 멈춘다")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offset", type=int, default=0, help="blocks 모드: 고정 무늬(블록 번호 mod 20)를 블록 단위로 돌리는 칸 수")
-    parser.add_argument("--test", action="append", metavar="세션", help="session 모드: 시험 세션(여러 번 줄 수 있음. 없으면 다시 찬 세션·마지막 세션)")
+    parser.add_argument("--test", action="append", metavar="세션", help="session 모드: 시험 세션(여러 번 줄 수 있음. 없으면 마지막 착용 묶음 전체 — "워치 다시 참" 표시 세션부터 다음 표시 전까지)")
     parser.add_argument("--val", action="append", metavar="세션", help="session 모드: 검증 세션(여러 번 줄 수 있음. 없으면 시험이 아닌 가장 늦은 세션)")
     parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
