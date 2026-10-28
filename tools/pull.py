@@ -5,15 +5,18 @@
 - 기기는 --watch·--phone으로 serial을 주거나, `adb devices -l`의 model로 고른다: SM-L320 = 워치, SM-F971N = 폰
   (adb는 model의 '-'를 '_'로 적는다). 무선 adb면 serial과 포트가 켤 때마다 바뀐다.
 - 받는 곳(SOURCES, 이 차례로):
-  1. 폰 files/watch-recordings → watch/recordings: 워치가 블루투스로 폰에 넘긴 녹음(계획 5). 파일마다 받고, 폰이 받는 중인 `.part`는 받지 않는다.
+  1. 폰 files/watch-recordings → watch/recordings: 워치가 블루투스로 폰에 넘긴 녹음(계획 5).
   2. 폰 files/sessions → phone/sessions
-  3. 워치 files/recordings → watch/recordings: 1에서 같은 크기로 받은 녹음은 다시 받지 않는다(같은 녹음은 한 번만, 크기 비교).
-  폰을 먼저 받는 까닭: 폰은 USB라 빠르고, 워치에서는 그 뒤 없거나 크기가 다른 녹음만 받으면 된다(그때는 워치 사본이 덮는다).
+  3. 워치 files/recordings → watch/recordings: 1에서 같은 크기로 받은 파일은 다시 받지 않는다(같은 녹음은 한 번만, 크기 비교).
+  폰을 먼저 받는 까닭: 폰은 USB라 빠르고, 워치에서는 그 뒤 없거나 크기가 다른 파일만 받으면 된다(그때는 워치 사본이 덮는다).
   워치가 adb에 없는 것은 문제가 아니다(폰만으로 두 기기의 데이터를 받는다). 폰이 없거나, --only로 고른 기기가 없으면 문제다.
-- 원격 폴더 아래 폴더마다 파일 크기를 `stat -c '%s %n'`으로 보고, PC 사본이 없거나 크기가 다른 것만 같은 자리에 받는다(설계 §7.3):
-  워치 녹음·폰 세션은 폴더째(`adb pull <원격>/<폴더> <부모>`), 폰의 워치 녹음은 다른 파일만 하나씩(`adb pull <원격>/<폴더>/<파일> <PC 파일>`).
+- 원격 폴더 아래 폴더마다 파일 크기를 `stat -c '%s %n'`으로 보고, PC 사본이 없거나 크기가 다른 파일만 하나씩 같은 자리에 받는다
+  (`adb pull <원격>/<폴더>/<파일> <PC 파일>`, 설계 §7.3). 받는 중인 `.part`(폰)·쓰다 남은 `.tmp`(rec.json.tmp 등)는 받지 않는다.
+  폴더마다 맨 끝 파일(녹음 rec.json, 세션 meta.json — PC 도구는 그 파일이 있는 폴더만 녹음·세션으로 본다)은 다른 파일을 모두 같은
+  크기로 받은 뒤에만 받고, 한 파일이 실패(끝 코드)하면 그 폴더는 거기서 멈춘다: 조각이 빠진 사본이 처리에 들어가지 않는다.
   받은 뒤 원격 크기를 다시 재서 PC 사본과 견준다. 받는 동안 크기가 바뀐(또는 새로 생긴) 파일은 녹음 중(폰은 받는 중)인 폴더라
-  문제로 세지 않고 "다음에 다시 받음"으로 알린다. 원격 크기가 그대로인데 PC 사본이 다르면 받기 실패다(무선 adb pull이 끊기면 조각이 잘린다).
+  문제로 세지 않고 "다음에 다시 받음"으로 알린다(그 폴더의 맨 끝 파일도 다음으로 미룬다). 원격 크기가 그대로인데 PC 사본이 다르면
+  받기 실패다(무선 adb pull이 끊기면 조각이 잘린다).
 - adb 실행은 run(args) -> (끝 코드, 출력)으로 주입한다. 시험은 가짜 실행기를 쓰고 실제 기기를 쓰지 않는다.
 문제가 하나라도 있으면 끝 코드 1로 끝난다.
 """
@@ -28,11 +31,11 @@ import hs_io  # noqa: E402
 
 APP = "/sdcard/Android/data/com.watchpose.handsonar/files"
 MODELS = {"watch": ("SM-L320", "워치"), "phone": ("SM-F971N", "폰")}  # 종류: (모델, 이름)
-PART = ".part"  # 폰이 받는 중인 파일(확인한 뒤 원래 이름으로 바뀐다)
-SOURCES = (  # (기기, 원격 폴더, PC 폴더(데이터 폴더 기준), 이름, 파일마다 받기, 받는 동안 크기가 바뀌는 까닭)
-    ("phone", APP + "/watch-recordings", ("watch", "recordings"), "폰의 워치 녹음", True, "폰이 받는 중"),
-    ("phone", APP + "/sessions", ("phone", "sessions"), "폰 세션", False, "녹음 중"),
-    ("watch", APP + "/recordings", ("watch", "recordings"), "워치 녹음", False, "녹음 중"),
+LEFTOVER = (".part", ".tmp")  # 폰이 받는 중인 파일, 쓰다 남은 임시 파일(rec.json.tmp·meta.json.tmp): 받지 않는다
+SOURCES = (  # (기기, 원격 폴더, PC 폴더(데이터 폴더 기준), 이름, 받는 동안 크기가 바뀌는 까닭, 폴더의 맨 끝 파일)
+    ("phone", APP + "/watch-recordings", ("watch", "recordings"), "폰의 워치 녹음", "폰이 받는 중", "rec.json"),
+    ("phone", APP + "/sessions", ("phone", "sessions"), "폰 세션", "녹음 중", "meta.json"),
+    ("watch", APP + "/recordings", ("watch", "recordings"), "워치 녹음", "녹음 중", "rec.json"),
 )
 
 
@@ -60,8 +63,8 @@ def devices(run, adb):
     return found
 
 
-def remote_sizes(run, adb, serial, remote, skip_part=False):
-    """{폴더 이름: {파일 이름: 크기}}. 원격 폴더가 없거나 비었으면 {}. skip_part면 받는 중인 `.part`를 뺀다."""
+def remote_sizes(run, adb, serial, remote):
+    """{폴더 이름: {파일 이름: 크기}}. 원격 폴더가 없거나 비었으면 {}. 받는 중·쓰다 남은 파일(LEFTOVER)은 뺀다."""
     _, out = run([adb, "-s", serial, "shell", f"stat -c '%s %n' {remote}/*/*"])
     sizes = {}
     for line in out.splitlines():
@@ -69,7 +72,7 @@ def remote_sizes(run, adb, serial, remote, skip_part=False):
         if not size.isdigit() or not path.startswith(remote + "/"):
             continue  # "No such file or directory" 같은 줄
         folder, _, name = path[len(remote) + 1:].partition("/")
-        if folder and name and "/" not in name and not (skip_part and name.endswith(PART)):
+        if folder and name and "/" not in name and not name.endswith(LEFTOVER):
             sizes.setdefault(folder, {})[name] = int(size)
     return sizes
 
@@ -85,43 +88,53 @@ def differs(remote, local):
     return sorted(n for n, s in remote.items() if local.get(n) != s)
 
 
-def pull_folder(run, adb, serial, remote, parent, name, files):
-    """폴더째 받는다(같은 자리에 덮어쓴다)."""
-    return run([adb, "-s", serial, "pull", f"{remote}/{name}", parent])
-
-
-def pull_files(run, adb, serial, remote, parent, name, files):
-    """PC에 없거나 크기가 다른 파일만 하나씩 받는다. (0이 아닌 첫 끝 코드나 0, 출력을 이은 것)."""
+def pull_files(run, adb, serial, remote, parent, name, files, last):
+    """PC에 없거나 크기가 다른 파일만 하나씩 받는다. 맨 끝 파일 last는 다른 파일이 모두 원격과 같은 크기로 있을 때만 받고,
+    한 파일이 실패(끝 코드)하면 거기서 멈춘다. (끝 코드, 출력을 이은 것, last를 다음으로 미뤘는지)."""
     folder = os.path.join(parent, name)
     os.makedirs(folder, exist_ok=True)
-    results = [run([adb, "-s", serial, "pull", f"{remote}/{name}/{f}", os.path.join(folder, f)]) for f in differs(files, local_sizes(folder))]
-    return next((code for code, _ in results if code != 0), 0), "\n".join(out for _, out in results)
+    wanted = differs(files, local_sizes(folder))
+    outs = []
+    for f in (n for n in wanted if n != last):
+        code, out = run([adb, "-s", serial, "pull", f"{remote}/{name}/{f}", os.path.join(folder, f)])
+        outs.append(out)
+        if code != 0:
+            return code, "\n".join(outs), last in wanted
+    if last not in wanted:
+        return 0, "\n".join(outs), False
+    if differs({n: s for n, s in files.items() if n != last}, local_sizes(folder)):
+        return 0, "\n".join(outs), True  # 앞 파일이 아직 다르다(받는 동안 바뀜·잘림): 맨 끝 파일은 다음에
+    code, out = run([adb, "-s", serial, "pull", f"{remote}/{name}/{last}", os.path.join(folder, last)])
+    outs.append(out)
+    return code, "\n".join(outs), False
 
 
 def pull_source(run, adb, serial, source, data):
     """받는 곳 하나(SOURCES의 한 줄): (보고 줄, 문제)."""
-    _, remote, local, label, per_file, busy = source
+    _, remote, local, label, busy, last = source
     parent = os.path.join(data, *local)
     os.makedirs(parent, exist_ok=True)
-    sizes = remote_sizes(run, adb, serial, remote, skip_part=per_file)
+    sizes = remote_sizes(run, adb, serial, remote)
     if not sizes:
         return [f"{label}({serial}): 받을 폴더 없음"], []
     wanted = [name for name in sorted(sizes) if differs(sizes[name], local_sizes(os.path.join(parent, name)))]
     lines = [f"{label}({serial}): 폴더 {len(sizes)}개, 새로 받을 것 {len(wanted)}개" + (f": {', '.join(wanted)}" if wanted else "")]
     problems = []
-    pull = pull_files if per_file else pull_folder
-    results = {name: pull(run, adb, serial, remote, parent, name, sizes[name]) for name in wanted}
-    after = remote_sizes(run, adb, serial, remote, skip_part=per_file) if wanted else {}  # 받은 뒤 다시 잰 원격 크기
+    results = {name: pull_files(run, adb, serial, remote, parent, name, sizes[name], last) for name in wanted}
+    after = remote_sizes(run, adb, serial, remote) if wanted else {}  # 받은 뒤 다시 잰 원격 크기
     for name in wanted:
-        code, out = results[name]
+        code, out, deferred = results[name]
         now = after.get(name, sizes[name])
         bad = differs(now, local_sizes(os.path.join(parent, name)))
         growing = [n for n in bad if sizes[name].get(n) != now.get(n)]  # 받는 동안 크기가 바뀐 파일(녹음 중·받는 중)
         broken = [n for n in bad if n not in growing]
+        if deferred and growing and last in broken:
+            broken.remove(last)  # 바뀌는 파일 때문에 미뤘다: 실패가 아니라 다음에 함께 받는다
         if code != 0 or broken:
             problems.append(f"{label} {name}: 받기 실패(끝 코드 {code}, 크기가 다른 파일 {', '.join(broken) or '없음'}) {out.strip()[-200:]}")
         elif growing:
-            lines.append(f"{label} {name}: {busy}이라 다음에 다시 받음(받는 동안 크기가 바뀐 파일 {', '.join(growing)})")
+            later = f", {last}은 다음에" if deferred else ""
+            lines.append(f"{label} {name}: {busy}이라 다음에 다시 받음(받는 동안 크기가 바뀐 파일 {', '.join(growing)}{later})")
     return lines, problems
 
 
