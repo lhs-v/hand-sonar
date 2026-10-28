@@ -43,11 +43,28 @@ class ProfilesTest(unittest.TestCase):
         p = profiles.compute(x, tx)
         expected = np.where(np.arange(250) >= 150, base + 90, base)
         np.testing.assert_array_equal(expected, p.direct)
-        np.testing.assert_array_equal(np.flatnonzero(~p.ok), [50, 100, 101])  # 무시한 튐 줄은 쓰지 않게 표시
+        # 무시한 튐 줄(50, 100, 101)과, 따라간 칸을 옮긴 자리(149 → 150)의 3줄 중앙값이 번지는 줄 148–151은 쓰지 않게 표시한다.
+        # (계획 3 최종 검토 I1로 옮김 둘레를 더함: 옮김이 진짜 튐인지 따라가기의 계단인지 가리지 않고 모두 뺀다.)
+        np.testing.assert_array_equal(np.flatnonzero(~p.ok), [50, 100, 101, 148, 149, 150, 151])
         peak = np.abs(p.raw).argmax(axis=0)
         steady = np.ones(250, dtype=bool)
         steady[[100, 101]] = False  # 두 줄 튐은 3줄 중앙값으로도 남는다(한 줄 튐은 중앙값이 지운다)
         self.assertTrue(np.all(peak[steady] == 300), np.flatnonzero(peak != 300))
+
+    def test_rows_around_a_tracking_move_are_not_ok(self):
+        # 직접 경로가 25줄마다 1칸씩 천천히 옮겨 가면 따라가기는 4칸씩 계단으로 옮긴다. 옮긴 자리마다 줄 k−1 … k+2는 ok가 아니고,
+        # 그 밖의 줄은 ok이며, 포락선 최대 칸 − 따라간 칸(drift)은 0 … +3칸에 머문다.
+        delays = 123 + np.arange(300) // 25
+        x, tx = received(delays, echo_gain=0.0)
+        p = profiles.compute(x, tx)
+        moves = np.flatnonzero(np.diff(p.direct) != 0)
+        self.assertGreaterEqual(len(moves), 2, p.direct)
+        expected = np.ones(300, dtype=bool)
+        for k in moves:
+            expected[k - 1: k + 3] = False
+        np.testing.assert_array_equal(expected, p.ok)
+        np.testing.assert_array_equal(moves, p.moves)
+        self.assertLessEqual(int(np.abs(p.drift).max()), profiles.TOL)
 
     def test_profiles_match_reference(self):
         x, tx = received(np.full(40, 123), moving=True)

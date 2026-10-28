@@ -14,6 +14,7 @@
 python -I에서도 사용자 설치 numpy를 찾게 경로를 붙인다(다른 도구는 numpy보다 먼저 이 모듈을 부른다).
 """
 import csv
+import hashlib
 import json
 import os
 import site
@@ -329,6 +330,15 @@ def write_json(path, value):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(value, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
+
+
+def sha256(path):
+    """파일 내용의 SHA-256(16진). 처리 결과가 지금 입력에서 나왔는지 견주는 지문이다."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def guarded(name, fn, *args):
