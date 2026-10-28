@@ -39,6 +39,22 @@ object SonarSpec {
         val i = AUTO_STOP_CHOICES.indexOf(current)
         return if (i < 0) 0 else AUTO_STOP_CHOICES[(i + 1) % AUTO_STOP_CHOICES.size]
     }
+
+    /**
+     * 워치 "녹음 볼륨" 선택지(전송 설계 §8, 계획 6): 0 = 그대로, 아니면 녹음하는 동안 미디어 볼륨을 그 단계로 맞추고 끝나면 되돌린다.
+     * 나중에 볼륨별로 직접 경로 세기·차분 잡음·학습 성능을 견주려는 것이다. 볼륨 11 세션의 평상시 신호가 약 −22 dBFS라 15(약 +8 dB)에서도
+     * 14 dB쯤 여유가 있다(설계 §8). 워치 화면의 "녹음 볼륨" 버튼이 이 순서로 돈다.
+     */
+    val RECORD_VOLUME_CHOICES: List<Int> = listOf(0, 11, 13, 15)
+
+    /** "녹음 볼륨" 버튼의 다음 값. 선택지에 없는 값이면 그대로(0)로 돌아간다. */
+    fun nextRecordVolume(current: Int): Int {
+        val i = RECORD_VOLUME_CHOICES.indexOf(current)
+        return if (i < 0) 0 else RECORD_VOLUME_CHOICES[(i + 1) % RECORD_VOLUME_CHOICES.size]
+    }
+
+    /** 녹음 동안 맞출 미디어 볼륨: 그대로(0 이하)면 [current], 아니면 [choice]를 [max] 안으로(지금보다 낮아도 고른 값으로 맞춘다). */
+    fun recordVolumeTarget(choice: Int, current: Int, max: Int): Int = if (choice <= 0) current else choice.coerceAtMost(max)
 }
 
 /** 처프 창 함수(설계 §5.2). [id]는 rec.json의 `tx.window`에 적는 이름이다. 기본은 [SonarSpec.DEFAULT_WINDOW]. */
