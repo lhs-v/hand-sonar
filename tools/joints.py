@@ -23,9 +23,13 @@
 계기(설계 §5): 아래 함수는 단위 손 좌표의 (프레임, 20, 3) 배열을 받는다. mm는 부르는 쪽이 프레임마다 L을 곱한다.
 - frame_errors: 프레임마다 관절 평균 거리(MPJPE의 프레임 값). joints=MOVING이면 손바닥 점 5·9·13·17을 뺀 움직이는 점 16개.
 - mean_pose·medoid: 학습 평균 자세(상수)와 학습 프레임 중 평균에 가장 가까운 실제 프레임.
-- collapse: 관절·축마다 예측 표준편차 ÷ 정답 표준편차(움직이는 점만. 점 5의 y·z와 점 17의 z는 틀 정의상 늘 0이다).
+- collapse: 관절·축마다 예측 표준편차 ÷ 정답 표준편차(움직이는 점만. 점 5의 y·z와 점 17의 z는 틀 정의상 늘 0이다). 정답과 무관한
+  프레임 떨림도 σ_pred를 키워, 아무것도 따라가지 못하는 모델이 "덜 쏠림"으로 읽힌다(검토: 시간 나누기 모델 σ비 0.674, 기울기 −0.015).
+- regression: 관절·축마다 예측을 정답에 회귀한 기울기 cov(p, t) ÷ var(t)와 상관. 기울기는 정답과 무관한 떨림에 부풀지 않는다.
+- smooth_within: 연속 덩어리 안에서만 SMOOTH_FRAMES 가운데 이동 평균한 예측. 떨림을 걷은 예측으로 σ비와 뼈 길이 부족을 다시 잰다.
 - bone_shortfall·by_segment: 뼈 20개마다 (1 − 예측 길이 중앙값 ÷ 정답 길이 중앙값) × 100, 마디(손바닥·첫·가운데·끝) 평균.
-- closer_to: 예측이 자기 정답보다 template(ASL-5 평균)에 더 가까운 프레임 비율.
+- toward: (예측 − 정답)을 start → end(학습 평균 자세 → 학습 ASL-5 평균) 단위 방향에 투영한 값. 편 손 쪽 치우침을 단위 손 길이로 잰다.
+- closer_to: 예측이 자기 정답보다 template(ASL-5 평균)에 더 가까운 프레임 비율(참고. 평균 쏠림과 ASL-5 쏠림을 가르지 못한다).
 - hold_floor: 정답 잡음 바닥. 유지 구간마다 그 구간 중앙값 자세까지의 관절 평균 거리.
 """
 import site
@@ -44,6 +48,7 @@ MIN_SCORE = 0.5  # 판정 점수 하한(설계 §3-1). 손잡이 최고 범주 �
 MAD_LIMIT = 3.0  # 손목–새끼 MCP 길이가 세션 중앙값에서 이 σ배 넘게 벗어나면 뺀다
 MAD_SCALE = 1.4826  # σ = MAD × 이 값(정규 분포에서 MAD ≈ 0.6745σ). 배율 없이 3 MAD면 ±2σ라 손목 동작이 치우쳐 빠졌다(머리말 1)
 MIRROR = np.array([-1.0, 1.0, 1.0])  # wx → −wx
+SMOOTH_FRAMES = 9  # 떨림을 걷는 평활 폭: 가운데 ± 4프레임(30 fps에서 0.3 s, 2 s 동작보다 훨씬 짧음). 검토가 같은 폭으로 σ비 0.674 → 0.349를 보였다
 
 
 def to_left(world, hand):
@@ -138,6 +143,41 @@ def collapse(pred, true, joints=MOVING):
     """관절·축마다 예측 표준편차 ÷ 정답 표준편차 (len(joints), 3). 1보다 한참 작으면 평균으로 쏠린 것이다."""
     j = list(joints)
     return np.asarray(pred)[:, j].std(axis=0) / np.asarray(true)[:, j].std(axis=0)
+
+
+def regression(pred, true, joints=MOVING):
+    """관절·축마다 (기울기 cov(p, t) ÷ var(t), 상관) 각 (len(joints), 3). 기울기 1 = 정답만큼 움직임, 0 = 정답과 무관(평균에 붙었거나 떨림만).
+    정답과 무관한 떨림은 σ비를 키우지만 기울기는 키우지 않는다(상관은 낮춘다). 예측이 움직이지 않는 관절·축의 상관은 0으로 둔다."""
+    j = list(joints)
+    p = np.asarray(pred, dtype=np.float64)[:, j]
+    t = np.asarray(true, dtype=np.float64)[:, j]
+    dp, dt = p - p.mean(axis=0), t - t.mean(axis=0)
+    cov = (dp * dt).mean(axis=0)
+    spread = np.sqrt((dp ** 2).mean(axis=0) * (dt ** 2).mean(axis=0))
+    return cov / (dt ** 2).mean(axis=0), np.divide(cov, spread, out=np.zeros_like(cov), where=spread > 0)
+
+
+def smooth_within(points, pieces, width=SMOOTH_FRAMES):
+    """덩어리(프레임 번호 배열 목록, 각각 시각 순서) 안에서만 가운데 width 이동 평균한 사본. 덩어리 끝은 창을 줄이고(덩어리 밖 프레임을
+    섞지 않는다), 덩어리에 들지 않은 프레임은 그대로 둔다."""
+    src = np.asarray(points, dtype=np.float64)
+    out = src.copy()
+    half = width // 2
+    for piece in pieces:
+        piece = np.asarray(piece, dtype=np.int64)
+        c = np.concatenate([np.zeros((1,) + src.shape[1:]), np.cumsum(src[piece], axis=0)])
+        k = np.arange(len(piece))
+        lo, hi = np.maximum(k - half, 0), np.minimum(k + half + 1, len(piece))
+        out[piece] = (c[hi] - c[lo]) / (hi - lo).reshape((-1,) + (1,) * (src.ndim - 1))
+    return out
+
+
+def toward(pred, true, start, end):
+    """프레임마다 (pred − true)를 start → end 단위 방향(20점 × xyz = 60차원)에 투영한 값 (N,). +면 end 쪽으로 치우쳤다.
+    pred가 한 자세 (1, 20, 3)이어도 된다(평균 자세 예측기)."""
+    u = (np.asarray(end, dtype=np.float64) - np.asarray(start, dtype=np.float64)).ravel()
+    d = np.asarray(pred, dtype=np.float64) - np.asarray(true, dtype=np.float64)
+    return d.reshape(len(d), -1) @ (u / np.linalg.norm(u))
 
 
 def bone_shortfall(pred, true):

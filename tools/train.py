@@ -22,9 +22,19 @@
     늘 자유 동작 꼬리이고, 세션이 여럿이어도 세션마다 이렇게 나눈다.
   overfit = 모든 프레임으로 학습·검증·평가(외울 수 있는가).
   나누기마다 프레임 수와 동작 종류 구성(손가락 굽히기·ASL 숫자·손목·자유 동작·라벨 없음)을 출력하고 metrics.json mix·split에 남긴다.
-- 평가(설계 §5, 시험 프레임의 예측·정답, mm = 단위 손 × 세션 L): MPJPE와 움직이는 점 MPJPE, 학습 평균 자세·메도이드 기준선,
-  평균 자세 대비 비, 붕괴 비, 뼈 길이 부족(마디별, 평균 자세의 값과 함께), 동작별 MPJPE, ASL-5(숫자 5) 쪽 예측 비율,
-  정답 잡음 바닥. 잡음 바닥은 예측이 필요 없어 모든 프레임의 정답으로 잰다(시간 나누기의 시험 구간은 자유 동작뿐이라 2 s 동작이 없다).
+- 평가(설계 §5, 시험 프레임의 예측·정답, mm = 단위 손 × 세션 L). 맨 윗줄은 평균 자세 대비 비(모델 MPJPE ÷ 학습 평균 자세 MPJPE)다.
+  MPJPE와 움직이는 점 MPJPE, 학습 평균 자세·메도이드 기준선, 동작별·동작 종류별·나누기별 MPJPE와 함께 아래를 낸다.
+  - 붕괴: 주 계기는 관절·축마다 예측을 정답에 회귀한 기울기(cov ÷ var, 움직이는 점 16 × 3축)와 상관이다. 기울기는 정답과 무관한 떨림에
+    부풀지 않는다(1 = 정답만큼 움직임, 0 = 정답과 무관). σ비(예측 σ ÷ 정답 σ)는 시험 덩어리 안에서 9프레임 평활한 예측으로 잰다
+    (sigmaRatioSmoothed). 평활하지 않은 σ비는 참고(sigmaRatioRaw)다: 떨림이 σ를 키워 따라가지 못하는 모델이 "덜 쏠림"으로 읽힌다.
+  - 뼈 길이 부족(마디별): 평활한 예측(modelSmoothed)이 주, 평활 전(modelRaw)은 참고, 학습 평균 자세의 값(meanPose)을 옆에 둔다.
+  - ASL-5: 맨 윗줄은 투영 치우침 asl5Bias다. ASL-5(숫자 5)가 아닌 시험 라벨 프레임에서 (예측 − 정답)을 "학습 평균 자세 → 학습 ASL-5 평균"
+    단위 방향에 투영한 평균(mm)을 모델과 평균 자세 예측기 각각 낸다. +면 편 손 쪽이다. 평균 자세의 값이 순수한 평균 쏠림의 기준이라
+    그보다 큰 양수면 평균을 넘어 편 손 쪽으로 쏠린 것이다(자유 동작뿐인 시험에서도 잴 수 있다). 옛 비율("자기 정답보다 ASL-5 평균에
+    가까운 예측")은 asl5CloserReference로 참고만 남긴다: 평균 자세가 편 손 쪽에 있어 평균 쏠림과 ASL-5 쏠림을 가르지 못하고, 떨림이
+    비율을 50% 쪽으로 끌어 판단을 거꾸로 낼 수 있다(검토: 시간 나누기 모델 89%로 "덜 쏠림", 투영으로는 +16.0 mm 대 평균 자세 +2.1 mm).
+  - 정답 잡음 바닥: 시험 프레임의 2 s 동작 유지 구간에서 잰다(noiseFloorSource "test". 세션 나누기면 시험 세션). 시험에 유지 구간이 없으면
+    (시간 나누기의 자유 동작 꼬리) 모든 프레임의 정답으로 재어 "전체 정답 유지 구간 흔들림(참고)"이라 적고 그림에 선을 긋지 않는다("all").
 - 그림 report.png 한 장: 시험 프레임의 손끝 셋(엄지·검지·약지) 손목까지 거리(정답·예측·평균 자세. 블록 나누기는 시험 블록을 이어
   붙이고, 다른 나누기는 시험 구간 첫 세션의 처음 30 s) + MPJPE 막대(평균 자세·메도이드·FastViT, 잡음 바닥 선) + 계기 숫자 + 세션
   시간표 띠(동작 종류와 나누기 역할). 영상 프레임이나 사람 모습은 넣지 않는다.
@@ -210,12 +220,20 @@ def instruments(ds, pred, train, test):
            "baselines": {"meanPoseMm": mpjpe(mean[None]), "medoidMm": mpjpe(med[None]),
                          "meanPoseMovingMm": mpjpe(mean[None], joints.MOVING), "medoidMovingMm": mpjpe(med[None], joints.MOVING)}}
     out["ratioToMeanPose"] = out["mpjpeMm"] / out["baselines"]["meanPoseMm"]
-    ratio = joints.collapse(guess, true)
+    smooth = joints.smooth_within(p, segments(ds["frame_ns"], ds["session"], test))[test]  # 시험 덩어리 안에서만 떨림을 걷은 예측
     finger = np.array([next(k for k, (_, idx) in enumerate(joints.FINGERS) if j + 1 in idx) for j in joints.MOVING])
-    out["collapse"] = {"mean": float(ratio.mean()), "min": float(ratio.min()),
-                       "byFinger": {joints.FINGERS[k][0]: float(ratio[finger == k].mean()) for k in range(5)}}
-    out["boneShortfallPercent"] = {"model": dict(zip(joints.SEGMENTS, joints.by_segment(joints.bone_shortfall(guess, true)).tolist())),
-                                   "meanPose": dict(zip(joints.SEGMENTS, joints.by_segment(joints.bone_shortfall(mean[None], true)).tolist()))}
+
+    def summary(v):
+        return {"mean": float(v.mean()), "min": float(v.min()), "byFinger": {joints.FINGERS[k][0]: float(v[finger == k].mean()) for k in range(5)}}
+
+    slope, corr = joints.regression(guess, true)
+    out["collapse"] = {"slope": summary(slope), "corr": summary(corr), "sigmaRatioSmoothed": summary(joints.collapse(smooth, true)),
+                       "sigmaRatioRaw": summary(joints.collapse(guess, true)), "smoothFrames": joints.SMOOTH_FRAMES}
+
+    def segment(q):
+        return dict(zip(joints.SEGMENTS, joints.by_segment(joints.bone_shortfall(q, true)).tolist()))
+
+    out["boneShortfallPercent"] = {"modelSmoothed": segment(smooth), "modelRaw": segment(guess), "meanPose": segment(mean[None])}
     labelled, cls = ds["labelled"][test], ds["class_id"][test]
     e_model = joints.frame_errors(guess, true) * scale
     e_mean = joints.frame_errors(mean[None], true) * scale
@@ -232,14 +250,23 @@ def instruments(ds, pred, train, test):
     other = labelled & (cls != ASL5)
     if five.any() and other.any():
         template = y[train][five].mean(axis=0)
-        out["asl5Closer"] = {"model": joints.closer_to(guess[other], true[other], template),
-                             "meanPose": joints.closer_to(np.broadcast_to(mean, true[other].shape), true[other], template),
-                             "frames": int(other.sum())}
+        k = other
+        out["asl5Bias"] = {"modelMm": float(np.mean(joints.toward(guess[k], true[k], mean, template) * scale[k])),
+                           "meanPoseMm": float(np.mean(joints.toward(mean[None], true[k], mean, template) * scale[k])),
+                           "meanToTemplateMm": float(np.linalg.norm(template - mean) * np.mean(scale[k])), "frames": int(k.sum())}
+        out["asl5CloserReference"] = {"model": joints.closer_to(guess[k], true[k], template),
+                                      "meanPose": joints.closer_to(np.broadcast_to(mean, true[k].shape), true[k], template), "frames": int(k.sum())}
     hold = ds["labelled"] & (ds["class_id"] >= 0)  # 2 s 동작(자유 동작 −1·일시정지 −2 아님)의 경계 0.5 s 뒤 유지 구간
-    groups = ds["session"][hold].astype(np.int64) * 1_000_000 + ds["prompt"][hold]
-    floor = joints.hold_floor(y[hold], groups, FLOOR_MIN_FRAMES) * mm[hold]
+    in_test = np.zeros(len(y), dtype=bool)
+    in_test[test] = True
+    for source, mask in (("test", hold & in_test), ("all", hold)):  # 시험에 유지 구간이 없으면 전체 정답의 흔들림(참고)
+        groups = ds["session"][mask].astype(np.int64) * 1_000_000 + ds["prompt"][mask]
+        floor = joints.hold_floor(y[mask], groups, FLOOR_MIN_FRAMES) * mm[mask]
+        if np.isfinite(floor).any():
+            break
     out["noiseFloorMm"] = float(np.nanmean(floor)) if np.isfinite(floor).any() else None
     out["noiseFloorFrames"] = int(np.isfinite(floor).sum())
+    out["noiseFloorSource"] = source if np.isfinite(floor).any() else None
     return out
 
 
@@ -345,9 +372,11 @@ def figure(path, ds, pred, parts, m, title, pieces, labels):
     bars = ax.bar(bar_names, values, color=[BASE, BASE, BLUE], width=0.6)
     for b, v in zip(bars, values):
         ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.1f}", ha="center", va="bottom", fontsize=9, color=INK)
-    if m["noiseFloorMm"] is not None:
+    if m["noiseFloorSource"] == "test":
         ax.axhline(m["noiseFloorMm"], color=INK2, lw=1.0, ls=":")
-        ax.set_title(f"점선 = 정답 잡음 바닥 {m['noiseFloorMm']:.1f} mm", loc="left", fontsize=9, color=INK2)
+        ax.set_title(f"점선 = 시험 정답 잡음 바닥 {m['noiseFloorMm']:.1f} mm", loc="left", fontsize=9, color=INK2)
+    elif m["noiseFloorSource"] == "all":  # 시험과 다른 자료라 바닥 선으로 긋지 않는다
+        ax.set_title(f"시험에 2 s 동작이 없어 바닥 선 없음(전체 정답 흔들림 {m['noiseFloorMm']:.1f} mm, 참고)", loc="left", fontsize=8.5, color=INK2)
     ax.set_ylabel("시험 MPJPE(mm)")
     ax.set_ylim(0, max(values) * 1.18)
     for side in ("top", "right"):
@@ -357,14 +386,17 @@ def figure(path, ds, pred, parts, m, title, pieces, labels):
     c, s = m["collapse"], m["boneShortfallPercent"]
     text = [f"평균 자세 대비 비  {m['ratioToMeanPose']:.2f}",
             f"MPJPE {m['mpjpeMm']:.1f} mm, 움직이는 점 {m['movingMpjpeMm']:.1f} mm(평균 자세 {m['baselines']['meanPoseMovingMm']:.1f})",
-            f"붕괴 비(예측 σ ÷ 정답 σ, 움직이는 점) 평균 {c['mean']:.2f}",
-            "  " + " · ".join(f"{k} {v:.2f}" for k, v in c["byFinger"].items()),
+            f"붕괴(움직이는 점): 회귀 기울기 {c['slope']['mean']:.2f} · 상관 {c['corr']['mean']:.2f}",
+            f"  σ비 평활({c['smoothFrames']}프레임) {c['sigmaRatioSmoothed']['mean']:.2f} · 평활 전(참고) {c['sigmaRatioRaw']['mean']:.2f}",
+            "  기울기 " + " · ".join(f"{k} {v:.2f}" for k, v in c["slope"]["byFinger"].items()),
             "뼈 길이 부족(%) 손바닥 · 첫 · 가운데 · 끝 마디",
-            "  FastViT " + " · ".join(f"{v:.1f}" for v in s["model"].values()),
+            "  FastViT 평활 " + " · ".join(f"{v:.1f}" for v in s["modelSmoothed"].values()),
+            "  평활 전(참고) " + " · ".join(f"{v:.1f}" for v in s["modelRaw"].values()),
             "  평균 자세 " + " · ".join(f"{v:.1f}" for v in s["meanPose"].values())]
-    if "asl5Closer" in m:
-        a = m["asl5Closer"]
-        text.append(f"정답보다 ASL-5 평균에 가까운 예측 {a['model'] * 100:.0f}%(평균 자세 {a['meanPose'] * 100:.0f}%, {a['frames']}프레임)")
+    if "asl5Bias" in m:
+        a = m["asl5Bias"]
+        text += ["편 손(ASL-5) 쪽 치우침(평균 자세 → ASL-5 평균 방향)",
+                 f"  FastViT {a['modelMm']:+.1f} mm · 평균 자세 {a['meanPoseMm']:+.1f} mm({a['frames']}프레임)"]
     cells = [f"{name} {m['perKind'][key]['mpjpeMm']:.1f}({m['perKind'][key]['meanPoseMm']:.1f})" if m["perKind"][key]["frames"] else f"{name} 없음"
              for key, name in dataset.KINDS]
     text += ["동작 종류별 시험 MPJPE(mm), FastViT(평균 자세)", "  " + " · ".join(cells[:2]), "  " + " · ".join(cells[2:])]
@@ -404,14 +436,22 @@ def report(m):
     b, c, s = m["baselines"], m["collapse"], m["boneShortfallPercent"]
     lines = [f"평균 자세 대비 비 {m['ratioToMeanPose']:.3f}: FastViT {m['mpjpeMm']:.2f} mm / 평균 자세 {b['meanPoseMm']:.2f} mm(메도이드 {b['medoidMm']:.2f} mm)",
              f"  움직이는 점 MPJPE {m['movingMpjpeMm']:.2f} mm(평균 자세 {b['meanPoseMovingMm']:.2f}, 메도이드 {b['medoidMovingMm']:.2f})",
-             f"  붕괴 비 평균 {c['mean']:.3f}(최소 {c['min']:.3f}), 손가락별 " + ", ".join(f"{k} {v:.2f}" for k, v in c["byFinger"].items()),
-             "  뼈 길이 부족 % FastViT " + ", ".join(f"{k} {v:.1f}" for k, v in s["model"].items()),
+             f"  붕괴(움직이는 점 16 × 3축): 회귀 기울기 평균 {c['slope']['mean']:.3f}(최소 {c['slope']['min']:.3f}), 상관 평균 {c['corr']['mean']:.3f},"
+             " 손가락별 기울기 " + ", ".join(f"{k} {v:.2f}" for k, v in c["slope"]["byFinger"].items()),
+             f"    σ비 평활({c['smoothFrames']}프레임) 평균 {c['sigmaRatioSmoothed']['mean']:.3f}(최소 {c['sigmaRatioSmoothed']['min']:.3f}),"
+             f" 평활 전(참고, 떨림이 부풀림) {c['sigmaRatioRaw']['mean']:.3f}",
+             "  뼈 길이 부족 % FastViT 평활 " + ", ".join(f"{k} {v:.1f}" for k, v in s["modelSmoothed"].items()),
+             "                 평활 전(참고) " + ", ".join(f"{k} {v:.1f}" for k, v in s["modelRaw"].items()),
              "                 평균 자세 " + ", ".join(f"{k} {v:.1f}" for k, v in s["meanPose"].items())]
-    if "asl5Closer" in m:
-        a = m["asl5Closer"]
-        lines.append(f"  ASL-5가 아닌 동작에서 정답보다 ASL-5 평균에 가까운 예측 {a['model'] * 100:.1f}%(평균 자세 {a['meanPose'] * 100:.1f}%, {a['frames']}프레임)")
-    if m["noiseFloorMm"] is not None:
-        lines.append(f"  정답 잡음 바닥 {m['noiseFloorMm']:.2f} mm({m['noiseFloorFrames']}프레임)")
+    if "asl5Bias" in m:
+        a, r = m["asl5Bias"], m["asl5CloserReference"]
+        lines += [f"  편 손(ASL-5) 쪽 치우침(ASL-5가 아닌 시험 라벨 {a['frames']}프레임, 평균 자세 → ASL-5 평균 방향 투영): FastViT {a['modelMm']:+.2f} mm,"
+                  f" 평균 자세 {a['meanPoseMm']:+.2f} mm(두 평균 사이 {a['meanToTemplateMm']:.1f} mm)",
+                  f"    참고(옛 계기): 정답보다 ASL-5 평균에 가까운 예측 {r['model'] * 100:.1f}%(평균 자세 {r['meanPose'] * 100:.1f}%)"]
+    if m["noiseFloorSource"] == "test":
+        lines.append(f"  정답 잡음 바닥 {m['noiseFloorMm']:.2f} mm(시험 유지 구간 {m['noiseFloorFrames']}프레임)")
+    elif m["noiseFloorSource"] == "all":
+        lines.append(f"  전체 정답 유지 구간 흔들림(참고) {m['noiseFloorMm']:.2f} mm({m['noiseFloorFrames']}프레임) — 시험에 2 s 동작이 없어 바닥으로 쓰지 않는다")
     lines.append("  동작별 MPJPE(mm, 평균 자세): " + ", ".join(f"{r['name']} {r['mpjpeMm']:.1f}({r['meanPoseMm']:.1f}, {r['frames']})" for r in m["perLabel"]))
     lines.append("  동작 종류별 MPJPE(mm, 평균 자세, 비, 프레임): " + ", ".join(
         f"{text} {k['mpjpeMm']:.1f}({k['meanPoseMm']:.1f}, {k['ratioToMeanPose']:.2f}, {k['frames']})" if k["frames"] else f"{text} 시험에 없음"

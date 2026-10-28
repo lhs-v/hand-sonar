@@ -114,6 +114,52 @@ class InstrumentTest(unittest.TestCase):
             short[:, tip - 1] = self.true[:, tip - 2] + 0.8 * (self.true[:, tip - 1] - self.true[:, tip - 2])
         np.testing.assert_allclose(joints.by_segment(joints.bone_shortfall(short, self.true)), [0, 0, 0, 20], atol=1e-9)
 
+    def test_regression_slope_is_not_inflated_by_jitter(self):
+        rng = np.random.default_rng(6)
+        true = rng.normal(size=(400, 20, 3))
+        mean = true.mean(axis=0)
+        t = true - mean
+        n = rng.normal(size=true.shape)
+        n -= n.mean(axis=0)
+        n -= t * ((n * t).mean(axis=0) / (t ** 2).mean(axis=0))  # 관절·축마다 정답과 정확히 무관한 떨림
+        slope, corr = joints.regression(mean + 0.5 * t, true)  # 정답의 반만 움직임
+        self.assertEqual((16, 3), slope.shape)
+        np.testing.assert_allclose(slope, 0.5, atol=1e-12)
+        np.testing.assert_allclose(corr, 1.0, atol=1e-12)
+        stuck = mean + n * t.std(axis=0) / n.std(axis=0)  # 평균에 붙고 정답만큼 떨리는 예측
+        np.testing.assert_allclose(joints.collapse(stuck, true), 1.0, atol=1e-12)  # σ비는 '쏠리지 않음'으로 읽힌다
+        slope, corr = joints.regression(stuck, true)
+        np.testing.assert_allclose(slope, 0.0, atol=1e-12)
+        np.testing.assert_allclose(corr, 0.0, atol=1e-12)
+        slope, corr = joints.regression(true + n, true)  # 정답을 따라가며 떨림이 얹힌 예측
+        np.testing.assert_allclose(slope, 1.0, atol=1e-12)  # 기울기는 떨림에 부풀지 않는다
+        self.assertTrue((corr < 1).all() and (joints.collapse(true + n, true) > 1).all())
+
+    def test_smoothing_stays_inside_each_piece(self):
+        points = np.zeros((60, 20, 3))
+        a, b = np.arange(0, 60, 2), np.arange(1, 60, 2)  # 배열에서 번갈아 놓인 두 덩어리(시험 프레임 사이에 다른 프레임이 끼는 경우)
+        points[a] = 1.0
+        points[a, :, 0] += 0.3 * (-1.0) ** np.arange(len(a))[:, None]  # 덩어리 a 안의 번갈이 떨림
+        points[b] = -1.0
+        out = joints.smooth_within(points, [a, b], width=9)
+        np.testing.assert_allclose(out[b], -1.0, atol=1e-12)  # 이웃 덩어리와 섞이지 않는다
+        np.testing.assert_allclose(out[a][:, :, 1:], 1.0, atol=1e-12)
+        self.assertLessEqual(float(np.abs(out[a][4:-4, :, 0] - 1.0).max()), 0.3 / 9 + 1e-12)  # 9프레임 평균이 떨림을 1/9로
+        np.testing.assert_allclose(out[a[0]], points[a[:5]].mean(axis=0), atol=1e-12)  # 덩어리 끝은 창을 줄인다
+        np.testing.assert_allclose(joints.smooth_within(points, [a[:10]])[b], points[b], atol=0)  # 덩어리 밖 프레임은 그대로
+
+    def test_projection_measures_the_shift_toward_the_template(self):
+        rng = np.random.default_rng(7)
+        true = rng.normal(size=(50, 20, 3))
+        mean = rng.normal(size=(20, 3))
+        five = mean + rng.normal(size=(20, 3))
+        u = (five - mean) / np.linalg.norm(five - mean)
+        np.testing.assert_allclose(joints.toward(true + 0.2 * u, true, mean, five), 0.2, atol=1e-12)  # 편 손 쪽으로 0.2
+        side = rng.normal(size=(20, 3))
+        side -= (side * u).sum() * u  # 그 방향에 수직인 어긋남은 0
+        np.testing.assert_allclose(joints.toward(true + side, true, mean, five), 0.0, atol=1e-12)
+        np.testing.assert_allclose(joints.toward(mean[None], true, mean, five), (mean - true).reshape(50, -1) @ u.ravel(), atol=1e-12)
+
     def test_mean_pose_and_medoid_baselines(self):
         base = self.true[0]
         step = self.true[1] - self.true[0]
