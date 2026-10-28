@@ -3,7 +3,6 @@ package com.watchpose.handsonar.shared
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
 import java.io.OutputStreamWriter
 import java.io.Writer
 import java.util.Locale
@@ -52,7 +51,12 @@ object SensorPlan {
         SensorSpec(SensorKind.GRAVITY, IMU_PERIOD_US),
     )
 
-    /** 폰: 가속도·자이로(폰이 그대로였는지), 주변 밝기(카메라 조건). */
+    /**
+     * 폰: 가속도·자이로(폰이 그대로였는지), 주변 밝기(카메라 조건). 화면이 둘인 접는 폰(폴드8)은 밝기 센서도 둘일 수 있고, 기본 밝기 센서
+     * (getDefaultSensor)가 덮개 화면 쪽이면 펼쳐 세운 폰에서는 사용자 반대쪽 밝기를 잰다(계획 6 검토 M7). 쓴 센서는 json `sensors.list`,
+     * 같은 종류의 다른 센서는 `sensors.others`에 이름으로 남겨 기기 확인(작업 9)에서 어느 쪽인지 가린다. 이름만으로 안쪽 화면 것을 가를 수
+     * 있다고 확인되면 그때 그것을 고른다(지금은 기기 정보가 없어 기본 센서를 쓴다).
+     */
     val PHONE: List<SensorSpec> = listOf(
         SensorSpec(SensorKind.ACCEL, IMU_PERIOD_US),
         SensorSpec(SensorKind.GYRO, IMU_PERIOD_US),
@@ -84,7 +88,8 @@ object SensorCsv {
 data class SensorPart(val file: String, val rows: Long)
 
 /**
- * 기기가 준 센서 하나(json `sensors.list`, 계획 6). android.hardware.Sensor의 값을 그대로 옮기고, [periodUs]는 우리가 건 표본 주기다.
+ * 기기가 준 센서 하나(json `sensors.list`·`sensors.others`, 계획 6). android.hardware.Sensor의 값을 그대로 옮기고, [periodUs]는 우리가 건 표본
+ * 주기다(`others`의 듣지 않은 센서는 0).
  * [maxRateHz]는 1e6 / [minDelayUs]이고, minDelay가 0 이하(값이 바뀔 때만 내는 센서 등)면 null이다.
  * [reportingMode]는 Sensor.REPORTING_MODE_*(0 연속, 1 바뀔 때, 2 한 번, 3 특수)다.
  */
@@ -107,7 +112,8 @@ data class SensorInfo(
 }
 
 /**
- * rec.json·meta.json의 `sensors`(계획 6): 기기가 준 센서들, 기기에 없던 종류, CSV 조각과 줄 수, 종류별 줄 수, 기록 문제(없으면 null).
+ * rec.json·meta.json의 `sensors`(계획 6): 기기가 준 센서들, 기기에 없던 종류, 같은 종류의 듣지 않은 다른 센서([others] — 폴드8 밝기 센서 같은
+ * 것을 나중에 가리려고, 검토 M7), CSV 조각과 줄 수, 종류별 줄 수, 기록 문제(없으면 null).
  * 녹음 중에도 rec.json이 10초마다 다시 써지므로 그때의 줄 수는 그때까지다(끝난 녹음은 다 닫은 뒤의 값).
  */
 data class SensorReport(
@@ -116,32 +122,34 @@ data class SensorReport(
     val parts: List<SensorPart>,
     val counts: Map<SensorKind, Long>,
     val error: String?,
+    val others: List<SensorInfo> = emptyList(),
 ) {
     /** [JsonOut]으로 쓸 모양. 유한하지 않은 수는 null로 적는다(JsonOut이 거절해 rec.json 쓰기가 멈추지 않게). */
     fun toMap(): Map<String, Any?> = linkedMapOf<String, Any?>(
         "columns" to SensorCsv.HEADER,
-        "list" to sensors.map { s ->
-            linkedMapOf<String, Any?>(
-                "kind" to s.kind.id,
-                "type" to s.type,
-                "name" to s.name,
-                "vendor" to s.vendor,
-                "version" to s.version,
-                "periodUs" to s.periodUs,
-                "minDelayUs" to s.minDelayUs,
-                "maxDelayUs" to s.maxDelayUs,
-                "maxRateHz" to s.maxRateHz,
-                "resolution" to finite(s.resolution),
-                "maxRange" to finite(s.maxRange),
-                "fifoMax" to s.fifoMax,
-                "reportingMode" to s.reportingMode,
-                "wakeUp" to s.wakeUp,
-            )
-        },
+        "list" to sensors.map(::infoMap),
         "missing" to missing.map { it.id },
+        "others" to others.map(::infoMap),
         "parts" to parts.map { linkedMapOf<String, Any?>("file" to it.file, "rows" to it.rows) },
         "counts" to linkedMapOf<String, Any?>().apply { for ((kind, n) in counts) put(kind.id, n) },
         "error" to error,
+    )
+
+    private fun infoMap(s: SensorInfo) = linkedMapOf<String, Any?>(
+        "kind" to s.kind.id,
+        "type" to s.type,
+        "name" to s.name,
+        "vendor" to s.vendor,
+        "version" to s.version,
+        "periodUs" to s.periodUs,
+        "minDelayUs" to s.minDelayUs,
+        "maxDelayUs" to s.maxDelayUs,
+        "maxRateHz" to s.maxRateHz,
+        "resolution" to finite(s.resolution),
+        "maxRange" to finite(s.maxRange),
+        "fifoMax" to s.fifoMax,
+        "reportingMode" to s.reportingMode,
+        "wakeUp" to s.wakeUp,
     )
 
     private fun finite(x: Float): Float? = x.takeIf { it.isFinite() }
@@ -152,9 +160,10 @@ data class SensorReport(
  * 때는 줄의 받은 시각(그 기기의 elapsedNs)으로 잰다: 조각을 연 지 [partNs]가 지난 줄은 새 조각에 쓰고, 마지막으로 내보낸 지 [flushNs]가 지난
  * 줄 뒤에 버퍼를 파일로 내보낸다(따로 타이머를 두지 않는다). 그래서 파일이 녹음 중에도 1초쯤마다 자라고, 앱이 죽어도 그만큼 남는다.
  * 조각은 처음부터 제 이름으로 쓴다(WAV 조각과 같다): 녹음 서비스가 정지 때 보내기 전에 [close]하므로 보내기는 다 닫힌 파일만 옮긴다.
- * 버퍼는 [bufferChars] 크기로 정해져 있어 메모리가 늘지 않는다. 파일을 열거나 쓰지 못하면 [error]를 남기고 그 뒤 줄은 버린다(센서 기록이
- * 녹음을 멈추게 하지 않는다 — 예외를 내지 않는다). [close] 뒤의 줄도 버린다. 센서 스레드가 쓰고 다른 스레드가 [parts]·[counts]·[error]를
- * 읽으므로 모두 잠근다.
+ * 버퍼는 [bufferChars] 크기로 정해져 있어 메모리가 늘지 않는다. 파일을 열거나 쓰지 못하면(어떤 예외든 — 검토 M6) [error]를 남기고 그 뒤 줄은
+ * 버린다: 센서 스레드에서 예외가 새면 앱과 함께 소리 녹음이 멈추므로 예외를 내지 않는다. [close] 뒤의 줄도 버린다. 줄마다 할당하지 않는다
+ * (줄 글·문자 배열은 다시 쓰고, 종류별 셈은 [LongArray] — 검토 M9). 센서 스레드가 쓰고 다른 스레드가 [parts]·[counts]·[error]를 읽으므로
+ * 모두 잠근다. [openWriter]는 시험이 쓰다 실패하는 Writer를 넣는 자리다(파일, 버퍼 문자 수).
  */
 class SensorCsvWriter(
     private val dir: File,
@@ -162,6 +171,7 @@ class SensorCsvWriter(
     private val partNs: Long = PART_NS,
     private val flushNs: Long = FLUSH_NS,
     private val bufferChars: Int = BUFFER_CHARS,
+    private val openWriter: (File, Int) -> Writer = { file, chars -> BufferedWriter(OutputStreamWriter(FileOutputStream(file), Charsets.UTF_8), chars) },
 ) : AutoCloseable {
     private val lock = Any()
     private val row = StringBuilder(ROW_CHARS)
@@ -172,15 +182,16 @@ class SensorCsvWriter(
     private var openedNs = 0L
     private var flushedNs = 0L
     private val done = mutableListOf<SensorPart>()
-    private val perKind = LinkedHashMap<SensorKind, Long>()
+    private val perKind = LongArray(SensorKind.entries.size)
     private var closed = false
     private var failure: String? = null
 
     /** 닫힌 조각과, 쓰는 중인 조각(지금까지 쓴 줄 수). */
     val parts: List<SensorPart> get() = synchronized(lock) { done + listOfNotNull(out?.let { SensorPart(currentName, currentRows) }) }
 
-    /** 종류마다 쓴 줄 수(처음 나온 차례). */
-    val counts: Map<SensorKind, Long> get() = synchronized(lock) { LinkedHashMap(perKind) }
+    /** 종류마다 쓴 줄 수(종류 차례, 줄이 없는 종류는 뺀다). */
+    val counts: Map<SensorKind, Long>
+        get() = synchronized(lock) { SensorKind.entries.filter { perKind[it.ordinal] > 0 }.associateWith { perKind[it.ordinal] } }
 
     /** 파일을 열거나 쓰지 못한 까닭(없으면 null). 그 뒤 줄은 버렸다. */
     val error: String? get() = synchronized(lock) { failure }
@@ -199,12 +210,12 @@ class SensorCsvWriter(
                 row.getChars(0, n, chars, 0)
                 w.write(chars, 0, n)
                 currentRows++
-                perKind[kind] = (perKind[kind] ?: 0L) + 1L
+                perKind[kind.ordinal]++
                 if (recvNs - flushedNs >= flushNs) {
                     w.flush()
                     flushedNs = recvNs
                 }
-            } catch (e: IOException) {
+            } catch (e: Exception) {
                 fail(e)
             }
         }
@@ -217,7 +228,7 @@ class SensorCsvWriter(
             closed = true
             try {
                 closeCurrent()
-            } catch (e: IOException) {
+            } catch (e: Exception) {
                 fail(e)
             }
         }
@@ -225,7 +236,7 @@ class SensorCsvWriter(
 
     private fun open(nowNs: Long): Writer {
         val file = File(dir, String.format(Locale.ROOT, "%s-%03d.csv", base, done.size))
-        val w = BufferedWriter(OutputStreamWriter(FileOutputStream(file), Charsets.UTF_8), bufferChars)
+        val w = openWriter(file, bufferChars)
         currentName = file.name
         currentRows = 0
         openedNs = nowNs
@@ -244,7 +255,7 @@ class SensorCsvWriter(
         w.close()
     }
 
-    private fun fail(e: IOException) {
+    private fun fail(e: Exception) {
         if (failure == null) failure = "센서 기록 쓰기 실패: ${e.message ?: e.javaClass.simpleName}"
         val w = out ?: return
         out = null

@@ -96,7 +96,7 @@ class SessionMetaTest {
         assertTrue(
             given.contains(
                 "\"rewear\":true,\"context\":{\"place\":\"집\",\"posture\":\"sitting\",\"armSupport\":\"desk\",\"strap\":\"normal\"}," +
-                    "\"sensors\":{\"columns\":\"t_ns,recv_ns,sensor,x,y,z,accuracy\",\"list\":[],\"missing\":[\"light\"]," +
+                    "\"sensors\":{\"columns\":\"t_ns,recv_ns,sensor,x,y,z,accuracy\",\"list\":[],\"missing\":[\"light\"],\"others\":[]," +
                     "\"parts\":[{\"file\":\"phone_sensors-000.csv\",\"rows\":3}],\"counts\":{\"acc\":3},\"error\":null},\"video\":",
             ),
             given,

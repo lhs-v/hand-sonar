@@ -124,7 +124,7 @@ class RecordingLogTest {
         val json = l.toJson()
         assertTrue(
             json.endsWith(
-                ""","parts":[],"sensors":{"columns":"t_ns,recv_ns,sensor,x,y,z,accuracy","list":[],"missing":["mag"],""" +
+                ""","parts":[],"sensors":{"columns":"t_ns,recv_ns,sensor,x,y,z,accuracy","list":[],"missing":["mag"],"others":[],""" +
                     """"parts":[{"file":"sensors-000.csv","rows":4}],"counts":{"acc":4},"error":null}}""",
             ),
             json,

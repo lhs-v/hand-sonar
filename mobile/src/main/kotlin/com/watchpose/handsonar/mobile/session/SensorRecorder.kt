@@ -17,6 +17,7 @@ import java.io.File
 
 /**
  * 세션 동안 폰 센서를 세션 폴더의 `[base]-NNN.csv`에 적는다(전송 설계 §8, 계획 6): 가속도·자이로(폰이 그대로였는지), 주변 밝기(카메라 조건).
+ * 접는 폰은 기본 밝기 센서가 덮개 화면 쪽일 수 있어(검토 M7, `SensorPlan.PHONE`) 같은 종류의 다른 센서 이름도 meta.json `sensors.others`에 남긴다.
  * [specs]의 종류마다 기본 센서(getDefaultSensor)를 찾아 센서 스레드 하나(HandlerThread, 보통 우선순위 — 카메라 분석·마이크 스레드와 따로)에서
  * 배치 없이(최대 지연 0) 듣고, 이벤트마다 이벤트 시각(SensorEvent.timestamp)과 받은 시각(SystemClock.elapsedRealtimeNanos)을
  * [SensorCsvWriter]에 넘긴다. 줄 쓰기·1분 조각·1초마다 내보내기·정해진 버퍼는 그쪽이 맡는다.
@@ -33,15 +34,20 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
     // 아래 넷은 start가 센서 스레드를 띄우기 전에 한 번 정하고, 센서 스레드와 세션을 닫는 스레드가 읽는다
     @Volatile private var kinds: Map<Int, SensorKind> = emptyMap()
     @Volatile private var found: List<SensorInfo> = emptyList()
+    @Volatile private var others: List<SensorInfo> = emptyList()
     @Volatile private var missing: List<SensorKind> = emptyList()
     @Volatile private var problem: String? = null
 
     private val listener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
-            val received = SystemClock.elapsedRealtimeNanos()
-            val type = event.sensor?.type ?: return
-            val kind = kinds[type] ?: return
-            writer.add(kind, event.timestamp, received, event.values, event.accuracy)
+            try {
+                val received = SystemClock.elapsedRealtimeNanos()
+                val type = event.sensor?.type ?: return
+                val kind = kinds[type] ?: return
+                writer.add(kind, event.timestamp, received, event.values, event.accuracy)
+            } catch (e: Exception) { // 센서 스레드에서 예외가 새면 앱과 함께 소리 녹음이 멈춘다(검토 M6): 한 번 적고 넘긴다
+                if (problem == null) problem = "센서 이벤트 오류: ${e.message ?: e.javaClass.simpleName}"
+            }
         }
 
         override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit // 정확도는 줄마다 accuracy 칸에 있다
@@ -56,7 +62,12 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
         try {
             val chosen = specs.mapNotNull { spec -> m.getDefaultSensor(spec.kind.androidType)?.let { spec to it } }
             missing = specs.map { it.kind } - chosen.map { it.first.kind }.toSet()
-            found = chosen.map { (spec, sensor) -> info(spec, sensor) }
+            found = chosen.map { (spec, sensor) -> info(spec.kind, spec.periodUs, sensor) }
+            // 같은 종류의 다른 센서(듣지 않음, 주기 0): 폴드8 밝기 센서처럼 기본 센서가 어느 쪽인지 나중에 가리려고 이름을 남긴다(검토 M7)
+            others = specs.flatMap { spec ->
+                val used = chosen.firstOrNull { it.first == spec }?.second
+                m.getSensorList(spec.kind.androidType).orEmpty().filter { it !== used }.map { info(spec.kind, 0, it) }
+            }
             kinds = chosen.associate { (spec, _) -> spec.kind.androidType to spec.kind }
             if (chosen.isEmpty()) return
             val t = HandlerThread(THREAD_NAME).also { it.start() }
@@ -82,15 +93,15 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
 
     /** meta.json `sensors`. 문제(시작·쓰기)는 error에 이어 적는다. */
     fun report(): SensorReport =
-        SensorReport(found, missing, writer.parts, writer.counts, listOfNotNull(problem, writer.error).joinToString(" · ").ifEmpty { null })
+        SensorReport(found, missing, writer.parts, writer.counts, listOfNotNull(problem, writer.error).joinToString(" · ").ifEmpty { null }, others)
 
-    private fun info(spec: SensorSpec, s: Sensor) = SensorInfo(
-        kind = spec.kind,
+    private fun info(kind: SensorKind, periodUs: Int, s: Sensor) = SensorInfo(
+        kind = kind,
         type = s.type,
         name = s.name ?: "",
         vendor = s.vendor ?: "",
         version = s.version,
-        periodUs = spec.periodUs,
+        periodUs = periodUs,
         minDelayUs = s.minDelay,
         maxDelayUs = s.maxDelay,
         resolution = s.resolution,

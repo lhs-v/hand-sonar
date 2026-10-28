@@ -304,19 +304,26 @@ class RecorderService : LifecycleService() {
         lifecycleScope.launch(Dispatchers.Main) { finish(StopReason.ERROR, message) }
     }
 
-    /** rec.json을 임시 파일에 쓰고 이름을 바꿔 덮는다(쓰는 도중에 죽어도 앞 판이 남게). */
+    /**
+     * rec.json을 임시 파일에 쓰고 이름을 바꿔 덮는다(쓰는 도중에 죽어도 앞 판이 남게). 쓰지 못해도 예외를 내지 않고 화면에 남긴다(검토 M6):
+     * 틱(코루틴)이나 정지 경로에서 예외가 새면 앱이 죽어 녹음·볼륨 되돌리기가 함께 끊긴다.
+     */
     @Synchronized
     private fun writeLog() {
         val dir = folder ?: return
         val l = log ?: return
-        writer?.let { l.setParts(it.parts) }
-        sensors?.let { l.setSensors(it.report()) }
-        val json = l.toJson()
-        val tmp = File(dir, "rec.json.tmp")
-        tmp.writeText(json)
-        if (!tmp.renameTo(File(dir, "rec.json"))) {
-            File(dir, "rec.json").writeText(json)
-            tmp.delete()
+        try {
+            writer?.let { l.setParts(it.parts) }
+            sensors?.let { l.setSensors(it.report()) }
+            val json = l.toJson()
+            val tmp = File(dir, "rec.json.tmp")
+            tmp.writeText(json)
+            if (!tmp.renameTo(File(dir, "rec.json"))) {
+                File(dir, "rec.json").writeText(json)
+                tmp.delete()
+            }
+        } catch (e: Exception) {
+            RecorderState.update { it.copy(error = "rec.json을 쓰지 못함: ${e.message ?: e.javaClass.simpleName}") }
         }
     }
 
@@ -325,11 +332,12 @@ class RecorderService : LifecycleService() {
         finished = true
         ticker?.cancel()
         ticker = null
-        recorder?.stop()
-        player?.stop()
-        writer?.close()
+        // 정지 단계마다 예외를 따로 받는다(검토 M6): 한 단계가 던져도 볼륨 되돌리기·rec.json·보내기·포그라운드 내려놓기까지 간다.
+        runCatching { recorder?.stop() }
+        runCatching { player?.stop() }
+        val closeError = runCatching { writer?.close() }.exceptionOrNull() // 마지막 WAV 조각의 머리말 고치기가 실패할 수 있다
         val stoppedAt = ClockPoint(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos()) // 소리가 멈춘 때(센서를 닫기 전)
-        sensors?.stop() // 마지막 rec.json과 보내기 전에 CSV를 닫는다
+        runCatching { sensors?.stop() } // 마지막 rec.json과 보내기 전에 CSV를 닫는다
         stopWatchingOutputs()
         // 재생이 멈춘 뒤 이 녹음이 바꾼 볼륨을 원래대로. 외부 출력이 이어져 있으면 미루고 까닭을 적는다(다음에 화면이 보일 때 되돌림).
         val restore = runCatching { (application as HandSonarApp).volumeRules.stop() }.getOrDefault(VolumeRestore(null, null, null))
@@ -345,23 +353,24 @@ class RecorderService : LifecycleService() {
             )
         }
         writeLog()
+        val problem = error ?: closeError?.let { "마지막 조각을 닫지 못함: ${it.message ?: it.javaClass.simpleName}" }
         // 진동은 포그라운드를 내려놓기 전에 낸다: 내려놓은 뒤의 백그라운드 진동은 무시될 수 있다(화면이 꺼진 자동 정지 끝).
-        if (error == null) haptics.stop() else haptics.error()
+        runCatching { if (problem == null) haptics.stop() else haptics.error() }
         // 멈춘 녹음을 폰으로 보낸다(전송 설계 §2). 포그라운드 서비스가 도는 동안이라 백그라운드 시작 제한에 걸리지 않는다.
         TransferService.start(this)
-        releaseAndStop(error)
+        releaseAndStop(problem)
     }
 
     /** 녹음을 열지 못했을 때: 남길 것이 없으므로 빈 폴더를 지우고 멈춘다. */
     private fun failToStart(message: String) {
         finished = true
-        recorder?.stop()
-        writer?.close()
-        sensors?.stop() // 센서는 재생까지 연 뒤에 시작하므로 보통 없다
+        runCatching { recorder?.stop() } // 단계마다 예외를 따로 받는다(검토 M6, finish와 같다)
+        runCatching { writer?.close() }
+        runCatching { sensors?.stop() } // 센서는 재생까지 연 뒤에 시작하므로 보통 없다
         stopWatchingOutputs()
         runCatching { (application as HandSonarApp).volumeRules.stop() } // 이 녹음이 바꾼 볼륨이면 되돌린다(바꾸기 전 실패면 할 일 없음)
-        folder?.let { dir -> if (dir.listFiles().isNullOrEmpty()) dir.delete() }
-        haptics.error() // finish()와 같은 이유로 포그라운드를 내려놓기 전에 낸다
+        runCatching { folder?.let { dir -> if (dir.listFiles().isNullOrEmpty()) dir.delete() } }
+        runCatching { haptics.error() } // finish()와 같은 이유로 포그라운드를 내려놓기 전에 낸다
         TransferService.start(this) // 녹음 시작이 끊은 보내기를 다시 잇는다(같은 까닭으로 내려놓기 전에)
         releaseAndStop(message)
     }

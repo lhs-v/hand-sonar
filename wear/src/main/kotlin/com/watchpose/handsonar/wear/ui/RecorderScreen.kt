@@ -199,7 +199,7 @@ private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus,
         // 녹음 볼륨을 걸지 못했거나(외부 출력·못 맞춤) 출력이 바뀌었거나 되돌리기를 미룸(계획 6 고침 I1·M3)
         s.volumeNote?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
         if (s.folder.isNotEmpty()) Text("폴더 ${s.folder}", style = small, color = dim, textAlign = TextAlign.Center)
-        s.sensorNote?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) } // 센서 문제(녹음은 이어 감)
+        if (s.running) s.sensorNote?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) } // 센서 문제(녹음은 이어 감), 녹음 중에만
         if (!s.running) transferLine(transfer)?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) }
         s.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
     }
