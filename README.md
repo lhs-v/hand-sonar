@@ -32,7 +32,7 @@
 4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`). 지연이 1프레임(33 ms) 밖이거나 상관 봉우리가 문턱(0.1) 아래면 맞춤을 확인하지 못한 세션으로 적고 끝 코드 1로 끝납니다.
 5. `python -I tools/pairs.py` — 카메라 프레임마다 프로파일 줄을 짝짓습니다(`pairs.csv`). 지연이 1프레임 안이고 상관이 문턱 이상인 세션만, 그리고 `sync.json`이 지금의 `align.json`·`rows.npz`·`landmarks.csv`에서 잰 것일 때만 짝짓습니다. 아니면 `pairs.csv`를 쓰지 않고(옛 것은 `pairs.stale.csv`로 바꿈) 끝 코드 1로 끝납니다.
 6. `python -I tools/compare.py <세션>` — 공개 데이터 왼손 표본과 나란히 그린 그림입니다(`compare.png`, 표본 위치는 `--public`).
-7. `python -I tools/train.py --mode overfit|time --run <이름>` — 대응표까지 만든 세션(표지음 둘, 맞춤 확인)으로 FastViT-T12(timm `fastvit_t12`, 처음부터)를 학습해 손목 기준 손 관절 20점을 회귀하고 평가합니다. `overfit`은 모든 프레임으로 학습·평가하고(외울 수 있는지), `time`은 세션마다 앞 70% 학습·15% 검증·끝 15% 시험입니다. 결과는 `../hand-sonar-data/processed/training/<이름>/`(`dataset.npz`, `model.pt`, `metrics.json`, `report.png`)에 씁니다. torch(CUDA)와 timm이 필요합니다. 공개 데이터로는 학습하지 않습니다.
+7. `python -I tools/train.py [--mode session|blocks|time|overfit] --run <이름>` — 대응표까지 만든 세션(표지음 둘, 맞춤 확인)으로 FastViT-T12(timm `fastvit_t12`, 처음부터)를 학습해 손목 기준 손 관절 20점을 회귀하고 평가합니다. 나누기는 `--mode`가 없으면 세션이 둘 이상일 때 `session`(세션 단위: 워치를 다시 찬 세션을, 없으면 가장 늦은 세션을 시험에 두고 `--test`·`--val`로 고를 수 있음), 하나일 때 `blocks`(10 s 블록을 학습·검증·시험에 흩음, 같은 착용 안의 낙관적 상한)입니다. `time`은 세션마다 앞 70% 학습·15% 검증·끝 15% 시험(세션 안 낙관적 상한), `overfit`은 모든 프레임으로 학습·평가합니다(외울 수 있는지). 평가는 평균 자세 대비 비가 맨 윗줄이고, 회귀 기울기와 평활한 예측의 σ비(평균 쏠림), 편 손 쪽 투영 치우침(ASL-5, mm), 정답 잡음 바닥을 함께 냅니다. 결과는 `../hand-sonar-data/processed/training/<이름>/`(`dataset.npz`(창 없이 row·목표·라벨·입력 지문, `--save-x`면 창도), `model.pt`, `metrics.json`, `report.png`)에 씁니다. torch(CUDA)와 timm이 필요합니다. 공개 데이터로는 학습하지 않습니다.
 
 ## 설치와 사용
 
