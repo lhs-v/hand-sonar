@@ -57,7 +57,10 @@ data class SessionContext(
         fun limit(text: String): String =
             if (text.codePointCount(0, text.length) <= MAX_PLACE) text else text.substring(0, text.offsetByCodePoints(0, MAX_PLACE))
 
-        /** 유니코드 공백(`(?U)` — 전각 공백 U+3000도 든다). */
-        private val WHITESPACE = Regex("""(?U)\s+""")
+        /**
+         * 유니코드 공백(ASCII 공백 + `\p{Z}` — 전각 공백 U+3000도 든다). `(?U)`는 PC 자바에서만 되고 안드로이드 ICU 정규식이
+         * 몰라서 클래스 초기화 때 PatternSyntaxException으로 앱이 시작하자마자 죽었다(2026-10-28 폴드8).
+         */
+        private val WHITESPACE = Regex("""[\s\p{Z}]+""")
     }
 }
