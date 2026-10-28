@@ -36,6 +36,8 @@
     비율을 50% 쪽으로 끌어 판단을 거꾸로 낼 수 있다(검토: 시간 나누기 모델 89%로 "덜 쏠림", 투영으로는 +16.0 mm 대 평균 자세 +2.1 mm).
   - 정답 잡음 바닥: 시험 프레임의 2 s 동작 유지 구간에서 잰다(noiseFloorSource "test". 세션 나누기면 시험 세션). 시험에 유지 구간이 없으면
     (시간 나누기의 자유 동작 꼬리) 모든 프레임의 정답으로 재어 "전체 정답 유지 구간 흔들림(참고)"이라 적고 그림에 선을 긋지 않는다("all").
+- metrics.json 형식 2(형식 1에서 collapse·boneShortfallPercent의 구조가 바뀌고 asl5Closer가 asl5Bias·asl5CloserReference로 나뉨,
+  noiseFloorSource·mix·split·stoppedBy를 더함).
 - 그림 report.png 한 장: 시험 프레임의 손끝 셋(엄지·검지·약지) 손목까지 거리(정답·예측·평균 자세. 블록 나누기는 시험 블록을 이어
   붙이고, 다른 나누기는 시험 구간 첫 세션의 처음 30 s) + MPJPE 막대(평균 자세·메도이드·FastViT, 잡음 바닥 선) + 계기 숫자 + 세션
   시간표 띠(동작 종류와 나누기 역할). 영상 프레임이나 사람 모습은 넣지 않는다.
@@ -586,7 +588,7 @@ def main():
     mm = ds["length_mm"][ds["session"]]
     m["splitMpjpeMm"] = {k: float(np.mean(joints.frame_errors(pred.reshape(-1, 20, 3)[v], yy[v]) * mm[v]))
                          for k, v in (("train", train), ("val", val), ("test", test))}
-    m.update({"format": 1, "run": run, "mode": mode, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
+    m.update({"format": 2, "run": run, "mode": mode, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
               "frames": {"train": int(len(train)), "val": int(len(val)), "test": int(len(test))}, "seed": args.seed,
               "epochs": len(history), "maxEpochs": args.epochs, "maxMinutes": args.max_minutes, "stoppedBy": stopped, "bestEpoch": best_epoch,
               "trainSeconds": seconds,
