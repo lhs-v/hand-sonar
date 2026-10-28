@@ -79,6 +79,31 @@ class SessionMetaTest {
     }
 
     @Test
+    fun contextAndSensorsComeRightAfterRewear() {
+        val base = meta(stats = null, endWallMs = null)
+        // 고르지 않은 세션 정보는 null, 시작 때 쓴 meta에는 센서 보고가 없다
+        val unset = base.toJson()
+        assertTrue(
+            unset.contains("\"rewear\":false,\"context\":{\"place\":null,\"posture\":null,\"armSupport\":null,\"strap\":null},\"sensors\":null,\"video\":"),
+            unset,
+        )
+        val report = SensorReport(emptyList(), listOf(SensorKind.LIGHT), listOf(SensorPart("phone_sensors-000.csv", 3)), mapOf(SensorKind.ACCEL to 3L), null)
+        val given = base.copy(
+            rewear = true,
+            context = SessionContext("집", Posture.SITTING, ArmSupport.DESK, Strap.NORMAL),
+            sensors = report,
+        ).toJson()
+        assertTrue(
+            given.contains(
+                "\"rewear\":true,\"context\":{\"place\":\"집\",\"posture\":\"sitting\",\"armSupport\":\"desk\",\"strap\":\"normal\"}," +
+                    "\"sensors\":{\"columns\":\"t_ns,recv_ns,sensor,x,y,z,accuracy\",\"list\":[],\"missing\":[\"light\"]," +
+                    "\"parts\":[{\"file\":\"phone_sensors-000.csv\",\"rows\":3}],\"counts\":{\"acc\":3},\"error\":null},\"video\":",
+            ),
+            given,
+        )
+    }
+
+    @Test
     fun phoneAudioJson() {
         val clock = listOf(ClockLine(0, 10, 960), ClockLine(48_000, 1_000_000_010, 48_960))
         assertEquals(

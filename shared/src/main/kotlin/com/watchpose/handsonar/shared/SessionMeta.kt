@@ -38,6 +38,9 @@ data class SessionStats(
 /**
  * meta.json(설계 §7.2). 세션 시작 때 end·stats 없이 한 번 쓰고, 끝날 때 모두 채워 다시 쓴다.
  * [hand]는 추적한 손(워치를 찬 손)으로 "left" | "right"다.
+ * [rewear]는 이 세션 전에 워치를 벗었다 다시 찼다는 표시다(준비 화면 "워치 다시 참", 계획 6 — 다시 찬 뒤 처음 보관된 세션에 참).
+ * [context]는 준비 화면에서 고른 세션 정보, [sensors]는 폰 센서 기록(`phone_sensors-NNN.csv`)의 보고로 끝에서 다시 쓴 meta에만 있다.
+ * 두 칸은 `rewear` 바로 뒤에 적는다.
  */
 data class SessionMeta(
     val app: String,
@@ -59,6 +62,8 @@ data class SessionMeta(
     val audioFile: String,
     val audioSource: String?,
     val cancelled: Boolean,
+    val context: SessionContext = SessionContext(),
+    val sensors: SensorReport? = null,
 ) {
     fun toJson(): String = JsonOut.write(
         linkedMapOf<String, Any?>(
@@ -103,6 +108,8 @@ data class SessionMeta(
                 )
             },
             "rewear" to rewear,
+            "context" to context.toMap(),
+            "sensors" to sensors?.toMap(),
             "video" to video?.let {
                 linkedMapOf<String, Any?>("file" to it.file, "width" to it.width, "height" to it.height, "frames" to it.frames, "ok" to it.ok)
             },
