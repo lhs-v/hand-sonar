@@ -43,7 +43,11 @@ class RecordingLogTest {
         l.finish(ClockPoint(2_000L, 9_000L), StopReason.STORAGE, emptyList())
         val json = l.toJson()
         assertTrue(""""stop":{"wallMs":2000,"elapsedNs":9000,"reason":"storage"},""" in json, json)
-        assertTrue(""""audio":{"rate":48000,"bits":16,"channels":1,"source":"VOICE_RECOGNITION"},""" in json, json)
+        // 음원을 고르지 않은(옛 방식) 기록은 sourceRequested·sourceFallback이 null이다
+        assertTrue(
+            """"audio":{"rate":48000,"bits":16,"channels":1,"source":"VOICE_RECOGNITION","sourceRequested":null,"sourceFallback":null},""" in json,
+            json,
+        )
         assertTrue(""""tx":{"f0Hz":18000.0,"bandwidthHz":3000.0,"samples":600,"window":"none","amplitude":0.5},""" in json, json)
         // 녹음 볼륨 "그대로": 고른 값·되돌린 값이 없고 원래 볼륨은 녹음 동안 볼륨과 같다. 외부 출력·바뀜·건너뜀·남은 기록도 없다
         assertTrue(
@@ -53,6 +57,31 @@ class RecordingLogTest {
         )
         assertTrue(""""recordClockSource":"read","recordClock":[],""" in json, json)
         assertTrue(""""playClock":[[4800,6000]],"underruns":[[7000,2]],"parts":[],"sensors":null}""" in json, json)
+    }
+
+    @Test
+    fun chosenSourceAndFallbackAreRecorded() {
+        // UNPROCESSED를 골랐지만 열리지 않아 VOICE_RECOGNITION으로 녹음함: 기록은 녹음을 연 뒤 실제 음원으로 고친다
+        val l = RecordingLog(
+            app = "0.1.0",
+            device = "samsung SM-L320",
+            android = "16 (API 36)",
+            start = ClockPoint(wallMs = 1_000L, elapsedNs = 5_000L),
+            source = "UNPROCESSED",
+            window = SweepWindow.TUKEY,
+            amplitude = 0.5f,
+            volumeStream = "music",
+            volumeIndex = 13,
+            volumeMax = 15,
+            sourceRequested = RecordSource.UNPROCESSED,
+        )
+        assertTrue(""""source":"UNPROCESSED","sourceRequested":"unprocessed","sourceFallback":null},""" in l.toJson(), l.toJson())
+        l.setSource("VOICE_RECOGNITION", "UNPROCESSED 녹음 초기화 실패")
+        assertTrue(
+            """"source":"VOICE_RECOGNITION","sourceRequested":"unprocessed","sourceFallback":"UNPROCESSED 녹음 초기화 실패"},""" in l.toJson(),
+            l.toJson(),
+        )
+        assertTrue(""""window":"tukey",""" in l.toJson(), l.toJson())
     }
 
     @Test

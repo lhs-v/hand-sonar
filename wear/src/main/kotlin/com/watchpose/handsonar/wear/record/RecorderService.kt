@@ -23,6 +23,7 @@ import androidx.wear.ongoing.OngoingActivity
 import androidx.wear.ongoing.Status
 import com.watchpose.handsonar.shared.ClockPoint
 import com.watchpose.handsonar.shared.PartWriter
+import com.watchpose.handsonar.shared.RecordSource
 import com.watchpose.handsonar.shared.RecordingLog
 import com.watchpose.handsonar.shared.SensorPlan
 import com.watchpose.handsonar.shared.StopReason
@@ -95,7 +96,11 @@ class RecorderService : LifecycleService() {
         if (intent?.action == ACTION_STOP) {
             finish(StopReason.USER, null)
         } else if (!RecorderState.status.value.running) {
-            begin(intent?.getIntExtra(EXTRA_AUTO_STOP_MINUTES, -1)?.takeIf { it >= 0 }, intent?.getBooleanExtra(EXTRA_SENSORS, true) ?: true)
+            begin(
+                intent?.getIntExtra(EXTRA_AUTO_STOP_MINUTES, -1)?.takeIf { it >= 0 },
+                intent?.getBooleanExtra(EXTRA_SENSORS, true) ?: true,
+                RecordSource.of(intent?.getStringExtra(EXTRA_SOURCE)),
+            )
         }
         return START_NOT_STICKY
     }
@@ -108,8 +113,9 @@ class RecorderService : LifecycleService() {
     /**
      * [autoStopOverride]는 이번 녹음만 설정 대신 쓰는 자동 정지 분이다(원격 시작이 넘긴다). null이면 설정을 따른다.
      * [withSensors]가 false면 이번 녹음은 센서를 듣지 않는다(원격 시작 `sensors` false).
+     * [sourceOverride]는 이번 녹음만 설정 대신 쓰는 녹음 음원이다(원격 시작 `source`). null이면 설정을 따른다.
      */
-    private fun begin(autoStopOverride: Int?, withSensors: Boolean) {
+    private fun begin(autoStopOverride: Int?, withSensors: Boolean, sourceOverride: RecordSource?) {
         TransferService.holdForRecording() // 녹음 중에는 보내지 않는다(전송 설계 §2): 보내던 파일을 바로 끊게 한다
         finished = false
         sensors = null // 멈춘 직후 다시 시작하면 서비스 객체가 그대로 쓰인다: 앞 녹음의 센서 보고가 새 rec.json에 들지 않게
@@ -158,7 +164,8 @@ class RecorderService : LifecycleService() {
         folder = dir
         val parts = PartWriter(dir)
         writer = parts
-        val rec = SonarRecorder(this, parts, onClock = ::onRecordClock, onError = ::onAudioError)
+        val sourceChoice = sourceOverride ?: settings.recordSource
+        val rec = SonarRecorder(this, parts, sourceChoice, onClock = ::onRecordClock, onError = ::onAudioError)
         val startedAt = ClockPoint(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos())
         log = RecordingLog(
             app = BuildConfig.VERSION_NAME,
@@ -177,6 +184,7 @@ class RecorderService : LifecycleService() {
             volumeOutputs = start.outputs,
             volumeSkipped = start.skipped,
             volumeLeftover = leftover.takeIf { it.pending != null },
+            sourceRequested = sourceChoice,
         )
         lastOutputs = start.outputs
         runCatching { am.registerAudioDeviceCallback(outputWatch, Handler(Looper.getMainLooper())) } // 등록할 때 지금 목록으로 한 번 불린다
@@ -185,6 +193,7 @@ class RecorderService : LifecycleService() {
             failToStart(it)
             return
         }
+        log?.setSource(rec.sourceName, rec.fallbackReason) // 고른 음원을 열지 못했으면 VOICE_RECOGNITION으로 연 것을 적는다
         val play = SonarPlayer(this, Sweep.pcm16(settings.window, settings.amplitude), onError = ::onAudioError)
         player = play
         play.start()?.let {
@@ -214,9 +223,11 @@ class RecorderService : LifecycleService() {
                 },
                 folder = dir.name,
                 sensorNote = sensors?.note(),
+                sourceNote = rec.fallbackReason?.let { "UNPROCESSED가 안 열려 음성 인식 음원으로 녹음" },
             )
         }
-        if (start.mismatch) haptics.error() else haptics.start() // 고른 볼륨에 못 맞추면 시작부터 알린다(M3)
+        // 고른 볼륨에 못 맞추거나(M3) 고른 음원을 열지 못했으면 시작부터 알린다
+        if (start.mismatch || rec.fallbackReason != null) haptics.error() else haptics.start()
         ticker = lifecycleScope.launch(Dispatchers.Default) { tickLoop(volume) }
     }
 
@@ -415,6 +426,9 @@ class RecorderService : LifecycleService() {
 
         /** 시작 인텐트의 센서 기록 여부(Boolean, 없으면 켬). false면 이번 녹음만 센서를 듣지 않는다. 원격 시작(adb)이 넘긴다. */
         const val EXTRA_SENSORS = "sensors"
+
+        /** 시작 인텐트의 녹음 음원 이름(String, RecordSource.id: auto·unprocessed·voice_recognition). 있으면 이번 녹음만 설정 대신 쓴다. */
+        const val EXTRA_SOURCE = "source"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         private const val TICK_MS = 1_000L
@@ -424,12 +438,13 @@ class RecorderService : LifecycleService() {
 
         /**
          * [autoStopMinutes]가 null이면 설정의 자동 정지를 따르고, 값이 있으면(0 = 끔) 이번 녹음만 그 값을 쓴다.
-         * [sensors]가 false면 이번 녹음만 센서를 듣지 않는다.
+         * [sensors]가 false면 이번 녹음만 센서를 듣지 않는다. [source]가 있으면 이번 녹음만 그 음원으로 연다.
          */
-        fun start(context: Context, autoStopMinutes: Int? = null, sensors: Boolean = true): Boolean = try {
+        fun start(context: Context, autoStopMinutes: Int? = null, sensors: Boolean = true, source: RecordSource? = null): Boolean = try {
             val intent = Intent(context, RecorderService::class.java)
             if (autoStopMinutes != null) intent.putExtra(EXTRA_AUTO_STOP_MINUTES, autoStopMinutes)
             if (!sensors) intent.putExtra(EXTRA_SENSORS, false)
+            if (source != null) intent.putExtra(EXTRA_SOURCE, source.id)
             ContextCompat.startForegroundService(context, intent)
             true
         } catch (e: Exception) {

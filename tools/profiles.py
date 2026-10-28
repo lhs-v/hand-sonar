@@ -54,12 +54,16 @@ FAR = slice(ROW0 + 120, ROW0 + 180)  # 같은 폭의 손 밖(43–64 cm), 견줌
 
 
 def tx_template(window, amplitude):
-    """워치가 낸 처프 한 주기(shared Sweep.pcm16과 같은 식: 18→21 kHz 600샘플, 한 창이면 대칭 한 창, 16비트 반올림)."""
+    """워치가 낸 처프 한 주기(shared Sweep.pcm16과 같은 식: 18→21 kHz 600샘플, 한 창이면 대칭 한 창, Tukey면 양 끝 TUKEY_RAMP샘플만
+    0.5 − 0.5·cos(π·j/TUKEY_RAMP)(j = 끝에서 센 자리), 16비트 반올림)."""
     i = np.arange(N)
     t = i / RATE
     w = np.sin(2 * np.pi * (18_000 * t + 0.5 * (3_000 / (N / RATE)) * t * t))
     if window == "hann":
         w = w * (0.5 - 0.5 * np.cos(2 * np.pi * i / (N - 1)))
+    elif window == "tukey":
+        j = np.minimum(i, N - 1 - i)
+        w = w * np.where(j >= TUKEY_RAMP, 1.0, 0.5 - 0.5 * np.cos(np.pi * j / TUKEY_RAMP))
     return np.round(w * min(max(amplitude, 0.0), 1.0) * 32767)
 
 
@@ -152,7 +156,8 @@ def step_rows(clock, frames, method, s1=None, s2=None):
     return bad
 
 
-WINDOWS = ("hann", "none")  # rec.json tx.window(shared SweepWindow.id)
+WINDOWS = ("hann", "none", "tukey")  # rec.json tx.window(shared SweepWindow.id)
+TUKEY_RAMP = 60  # Tukey 창의 양 끝 경사(샘플, shared SonarSpec.TUKEY_RAMP_SAMPLES와 같은 값)
 
 
 def tx_spec(rec):

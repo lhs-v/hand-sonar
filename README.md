@@ -9,7 +9,7 @@
 | `wear/` | 워치 앱. 18–21 kHz 처프(600 샘플, 48 kHz)를 계속 내면서 마이크를 녹음합니다. 1분 조각 WAV와 기록(`rec.json`), 가속도·자이로·지자기·중력 기록(`sensors-NNN.csv`)을 남기고, 녹음이 멈추면 블루투스로 폰에 넘깁니다. |
 | `mobile/` | 폰 앱. 정면 카메라와 MediaPipe Hand Landmarker로 손 관절 21점을 프레임마다 적고(`landmarks.csv`), 같은 프레임을 영상(`video.mp4`)으로 남깁니다. 안내 동작(손가락 굽히기, ASL 숫자, 손목, 자유 동작)을 시간표대로 띄우고(`prompts.csv`), 세션 시작과 끝에 표지음을 냅니다. 폰 센서(`phone_sensors-NNN.csv`)와 세션 정보도 적습니다. 워치가 넘긴 녹음을 받아 두고, 기록 화면에서 zip으로 내보냅니다. |
 | `shared/` | 두 앱이 같이 쓰는 순수 Kotlin 코드입니다(처프·표지음 규격, 검출기, 파일 형식, 세션 진행). JVM 시험이 있습니다. |
-| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`). |
+| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`). |
 
 ## 두 기기 시간 맞추기
 
@@ -39,6 +39,19 @@
 - **세션 정보**: 폰 준비 화면에서 장소, 자세(앉음·섬), 팔 받침(책상·공중), 줄 조임(헐렁·보통·꽉)을 고르면 다음 실행에도 남고 세션마다 `meta.json`의 `context`에 들어갑니다(고르지 않은 칸은 null).
 - **"워치 다시 참"**: 워치를 벗었다 다시 찼으면 준비 화면에서 켭니다. 다음에 보관되는 세션의 `meta.json` `rewear`가 참이 되고 표시는 꺼집니다(취소한 세션이면 켜진 채, 방금 세션을 되돌리면 다시 켜짐). 학습의 세션 나누기는 이 표시 세션부터 다음 표시 전까지를 한 착용으로 묶고, 마지막 착용을 통째로 시험으로 씁니다.
 - 새 파일은 다른 파일처럼 폰으로 넘어가고 `pull.py`·내보내기로 PC에 옵니다. 원격 시작에 `--ez sensors false`를 붙이면 그 녹음만 센서 기록을 끕니다(센서 기록이 소리에 주는 영향을 견줄 때).
+
+## 처프 창과 녹음 음원
+
+워치 화면에서 고르고, 다음 녹음에도 남습니다. 녹음마다 `rec.json`의 `tx.window`와 `audio`(`source` 실제로 연 음원, `sourceRequested` 고른 음원, `sourceFallback` 바꾼 까닭)에 적힙니다.
+
+- **처프 창**(Tukey · 한 창 · 창 없음): 처음 값은 Tukey 창(양 끝 60샘플 = 처프의 10%씩만 반 코사인으로 줄임)입니다.
+  - 한 창은 대역폭을 깎아 직접 경로 봉우리를 두 배로 넓힙니다(반높이 폭 34–85칸, 창 없음·공개 WatchHand 프로파일은 20–21칸). 넓은 봉우리가 손목 가까운 손가락 에코를 덮습니다.
+  - 창 없음은 처프 이음새마다 딸깍 소리가 들립니다.
+  - Tukey 창은 봉우리 폭을 창 없음 가까이 두고(시뮬레이션 24칸 대 22칸) 들리는 대역 누설을 약 49 dB 줄입니다.
+- **녹음 음원**(UNPROCESSED · 음성 인식 · 자동): 처음 값은 UNPROCESSED입니다. WatchHand는 워치에서 UNPROCESSED로 녹음했습니다(§3.2).
+  - 워치8은 UNPROCESSED 지원을 선언하지 않아 "자동"이면 음성 인식(VOICE_RECOGNITION)이 됩니다.
+  - UNPROCESSED가 열리지 않으면 음성 인식으로 녹음하고, 시작 때 오류 진동과 화면 한 줄로 알립니다.
+  - 원격 시작에 `--es source unprocessed`(또는 `voice_recognition`·`auto`)를 붙이면 그 녹음만 그 음원으로 엽니다.
 
 ## 내보내기 (USB 파일 전송만 되는 PC)
 
@@ -83,6 +96,11 @@ handsonar.keyPassword=android
 3. `python -I tools/profiles.py` — 공개 데이터(WatchHand)와 같은 처리로 에코 프로파일을 만듭니다(`profiles.npy`, `diff_profiles.npy`, `rows.npz`).
 4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`). 지연이 1프레임(33 ms) 밖이거나 상관 봉우리가 문턱(0.1) 아래면 맞춤을 확인하지 못한 세션으로 적고 끝 코드 1로 끝납니다.
 5. `python -I tools/pairs.py` — 카메라 프레임마다 프로파일 줄을 짝짓습니다(`pairs.csv`). 지연이 1프레임 안이고 상관이 문턱 이상인 세션만, 그리고 `sync.json`이 지금의 `align.json`·`rows.npz`·`landmarks.csv`에서 잰 것일 때만 짝짓습니다. 아니면 `pairs.csv`를 쓰지 않고(옛 것은 `pairs.stale.csv`로 바꿈) 끝 코드 1로 끝납니다.
+   - 신호 잣대: `python -I tools/signal_check.py [세션 …]` — 학습 없이 녹음 신호를 거칠게 봅니다(`signal.json`).
+     - 넷을 잽니다: 정답 관절 속도와 손 자리(칸 301–360) 차분 세기의 로그 상관, 움직임 대비(그 세기의 95% ÷ 중앙), 직접 경로 반높이 폭(처프 창 확인용), 줄 사이 직접 경로 흔들림.
+     - 같은 처리로 잰 공개 WatchHand(참가자 9 왼손) 10세션은 상관 0.39–0.70, 대비 4.6–10.9, 폭 21칸입니다. 이 데이터는 같은 처리·학습으로 같은 세션 안에서 손 모양을 따라갔습니다.
+     - 2026-10-28 우리 세션(한 창, 음성 인식 음원)은 상관 0.12–0.40, 대비 2.5–3.7이었고 따라가지 못했습니다.
+     - 맞춤 문턱에 걸려 `pairs.csv`가 없는 세션도 잽니다(대응은 그 자리에서만 만들고 파일을 쓰지 않습니다).
 6. `python -I tools/compare.py <세션>` — 공개 데이터 왼손 표본과 나란히 그린 그림입니다(`compare.png`, 표본 위치는 `--public`).
 7. `python -I tools/train.py [--mode session|blocks|time|overfit] --run <이름>` — 대응표까지 만든 세션(표지음 둘, 맞춤 확인)으로 FastViT-T12(timm `fastvit_t12`, 처음부터)를 학습해 손목 기준 손 관절 20점을 회귀하고 평가합니다. 나누기는 `--mode`가 없으면 세션이 둘 이상일 때 `session`(세션 단위: 마지막 착용 — 워치를 다시 찬 뒤 — 의 세션을 통째로, 착용이 하나뿐이면 가장 늦은 세션을 시험에 두고 `--test`·`--val`로 고를 수 있음), 하나일 때 `blocks`(10 s 블록을 학습·검증·시험에 흩음, 같은 착용 안의 낙관적 상한)입니다. `time`은 세션마다 앞 70% 학습·15% 검증·끝 15% 시험(세션 안 낙관적 상한), `overfit`은 모든 프레임으로 학습·평가합니다(외울 수 있는지). 평가는 평균 자세 대비 비가 맨 윗줄이고, 회귀 기울기와 평활한 예측의 σ비(평균 쏠림), 편 손 쪽 투영 치우침(ASL-5, mm), 정답 잡음 바닥을 함께 냅니다. 결과는 `../hand-sonar-data/processed/training/<이름>/`(`dataset.npz`(창 없이 row·목표·라벨·입력 지문, `--save-x`면 창도), `model.pt`, `metrics.json`, `report.png`)에 씁니다. torch(CUDA)와 timm이 필요합니다. 공개 데이터로는 학습하지 않습니다.
 

@@ -38,6 +38,21 @@ class SweepTest {
     }
 
     @Test
+    fun tukeyTapersOnlyTheEnds() {
+        // 양 끝 60샘플만 0.5 − 0.5·cos(π·j/60)을 곱하고(j = 끝에서 센 자리, 0이면 0) 가운데는 창 없음과 같다
+        val tukey = Sweep.wave(SweepWindow.TUKEY)
+        val none = Sweep.wave(SweepWindow.NONE)
+        assertEquals(0f, tukey.first(), 1e-6f)
+        assertEquals(0f, tukey.last(), 1e-6f)
+        for (i in 60 until 540) assertEquals(none[i], tukey[i], 1e-6f)
+        for (j in listOf(1, 30, 59)) {
+            val w = 0.5 - 0.5 * kotlin.math.cos(kotlin.math.PI * j / 60)
+            assertEquals((none[j] * w).toFloat(), tukey[j], 1e-6f)
+            assertEquals((none[599 - j] * w).toFloat(), tukey[599 - j], 1e-6f)
+        }
+    }
+
+    @Test
     fun pcm16ScalesAndClampsAmplitude() {
         val peak = Sweep.pcm16(SweepWindow.NONE, 0.5f).maxOf { abs(it.toInt()) }
         assertTrue(peak in 16_000..16_384, "최대 $peak")

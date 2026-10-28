@@ -7,6 +7,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.content.ContextCompat
+import com.watchpose.handsonar.shared.RecordSource
 import com.watchpose.handsonar.wear.HandSonarApp
 import com.watchpose.handsonar.wear.record.RecorderService
 import com.watchpose.handsonar.wear.record.RecorderState
@@ -72,6 +73,7 @@ class MainActivity : ComponentActivity() {
                 this,
                 intent.getIntExtra(RecorderService.EXTRA_AUTO_STOP_MINUTES, -1).takeIf { it >= 0 },
                 sensors = intent.getBooleanExtra(RecorderService.EXTRA_SENSORS, true),
+                source = RecordSource.of(intent.getStringExtra(RecorderService.EXTRA_SOURCE)),
             )
         } else {
             RecorderState.update { it.copy(error = "마이크 권한이 없어 원격 시작을 못 했습니다. 워치에서 녹음을 한 번 시작해 권한을 허용하세요") }

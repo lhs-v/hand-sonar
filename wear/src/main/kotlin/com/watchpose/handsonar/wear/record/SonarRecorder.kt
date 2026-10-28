@@ -10,11 +10,13 @@ import android.media.MediaRecorder
 import android.os.Process
 import android.os.SystemClock
 import com.watchpose.handsonar.shared.PartWriter
+import com.watchpose.handsonar.shared.RecordSource
 import com.watchpose.handsonar.shared.SonarSpec
 
 /**
- * 48 kHz 16비트 1채널로 녹음해 [writer]에 그대로 쓴다(설계 §5.2). 녹음 소스는 UNPROCESSED를 지원하면 그것,
- * 아니면 VOICE_RECOGNITION이다(워치8은 VOICE_RECOGNITION). 녹음 버퍼를 1초로 크게 잡아 파일 쓰기가 잠깐 막혀도 넘치지 않게 한다.
+ * 48 kHz 16비트 1채널로 녹음해 [writer]에 그대로 쓴다(설계 §5.2). 녹음 음원은 [choice]다(2026-10-28): UNPROCESSED·VOICE_RECOGNITION은 그대로,
+ * AUTO는 기기가 UNPROCESSED 지원을 선언하면 그것, 아니면 VOICE_RECOGNITION이다(워치8은 선언하지 않는다). UNPROCESSED가 열리지 않으면
+ * VOICE_RECOGNITION으로 다시 열고 그 까닭을 [fallbackReason]에 남긴다. 녹음 버퍼를 1초로 크게 잡아 파일 쓰기가 잠깐 막혀도 넘치지 않게 한다.
  * 1초마다 [onClock]으로 (녹음 위치, 부팅 후 시각, 읽은 프레임 수, 타임스탬프에서 왔는지)를 낸다.
  * 녹음이 끊기거나 예외가 나면 [onError]를 한 번 부르고 멈춘다. 다시 열지 않는다: 이어 붙이면 시간이 어긋난다.
  *
@@ -31,6 +33,7 @@ import com.watchpose.handsonar.shared.SonarSpec
 class SonarRecorder(
     private val context: Context,
     private val writer: PartWriter,
+    private val choice: RecordSource,
     private val onClock: (frame: Long, elapsedNs: Long, framesRead: Long, fromTimestamp: Boolean) -> Unit,
     private val onError: (String) -> Unit,
 ) {
@@ -43,26 +46,48 @@ class SonarRecorder(
     var frames: Long = 0
         private set
 
-    /** rec.json의 audio.source 값. */
+    /** 실제로 연 음원. [start] 전에는 처음 열어 볼 음원이다. */
+    private var source: Int = firstSource()
+
+    /** rec.json의 audio.source 값([start]가 성공한 뒤에 읽는다). */
     val sourceName: String
         get() = if (source == MediaRecorder.AudioSource.UNPROCESSED) "UNPROCESSED" else "VOICE_RECOGNITION"
 
-    private val source: Int by lazy {
-        val am = context.getSystemService(AudioManager::class.java)
-        if (am?.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true") {
-            MediaRecorder.AudioSource.UNPROCESSED
-        } else {
-            MediaRecorder.AudioSource.VOICE_RECOGNITION
+    /** 고른 음원(UNPROCESSED)을 열지 못해 VOICE_RECOGNITION으로 바꾼 까닭. 바꾸지 않았으면 null. */
+    var fallbackReason: String? = null
+        private set
+
+    private fun firstSource(): Int = when (choice) {
+        RecordSource.UNPROCESSED -> MediaRecorder.AudioSource.UNPROCESSED
+        RecordSource.VOICE_RECOGNITION -> MediaRecorder.AudioSource.VOICE_RECOGNITION
+        RecordSource.AUTO -> {
+            val am = context.getSystemService(AudioManager::class.java)
+            if (am?.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) == "true") {
+                MediaRecorder.AudioSource.UNPROCESSED
+            } else {
+                MediaRecorder.AudioSource.VOICE_RECOGNITION
+            }
         }
     }
 
-    /** 녹음을 열고 녹음 스레드를 시작한다. 되면 null, 안 되면 사람이 읽을 이유. */
-    @SuppressLint("MissingPermission") // 화면이 RECORD_AUDIO를 받은 뒤에만 서비스를 시작한다
+    /** 녹음을 열고 녹음 스레드를 시작한다. 되면 null, 안 되면 사람이 읽을 이유. UNPROCESSED가 안 열리면 VOICE_RECOGNITION으로 다시 연다. */
     fun start(): String? {
+        val first = open(source) ?: return null
+        if (source != MediaRecorder.AudioSource.UNPROCESSED) return first
+        source = MediaRecorder.AudioSource.VOICE_RECOGNITION
+        val second = open(source) ?: run {
+            fallbackReason = "UNPROCESSED $first"
+            return null
+        }
+        return "$second(UNPROCESSED도 $first)"
+    }
+
+    @SuppressLint("MissingPermission") // 화면이 RECORD_AUDIO를 받은 뒤에만 서비스를 시작한다
+    private fun open(src: Int): String? {
         val rate = SonarSpec.SAMPLE_RATE
         val minBuffer = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val r = try {
-            AudioRecord(source, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer, SonarSpec.BYTES_PER_SECOND))
+            AudioRecord(src, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuffer, SonarSpec.BYTES_PER_SECOND))
         } catch (e: Exception) {
             return "녹음을 못 엶: ${e.message ?: e.javaClass.simpleName}"
         }

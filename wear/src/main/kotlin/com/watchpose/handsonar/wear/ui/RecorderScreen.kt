@@ -29,6 +29,7 @@ import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
+import com.watchpose.handsonar.shared.RecordSource
 import com.watchpose.handsonar.shared.SonarSpec
 import com.watchpose.handsonar.shared.StorageBudget
 import com.watchpose.handsonar.shared.SweepWindow
@@ -109,10 +110,18 @@ fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> U
             if (!status.running) {
                 item {
                     FilledTonalButton(
-                        onClick = { settings.setWindow(if (values.window == SweepWindow.NONE) SweepWindow.HANN else SweepWindow.NONE) },
+                        onClick = settings::cycleWindow,
                         modifier = Modifier.fillMaxWidth(),
-                        secondaryLabel = { Text(if (values.window == SweepWindow.NONE) "창 없음" else "한 창") },
+                        secondaryLabel = { Text(windowLabel(values.window)) },
                         label = { Text("처프 창") },
+                    )
+                }
+                item {
+                    FilledTonalButton(
+                        onClick = settings::cycleRecordSource,
+                        modifier = Modifier.fillMaxWidth(),
+                        secondaryLabel = { Text(sourceLabel(values.recordSource)) },
+                        label = { Text("녹음 음원") },
                     )
                 }
                 item {
@@ -200,9 +209,24 @@ private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus,
         s.volumeNote?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
         if (s.folder.isNotEmpty()) Text("폴더 ${s.folder}", style = small, color = dim, textAlign = TextAlign.Center)
         if (s.running) s.sensorNote?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) } // 센서 문제(녹음은 이어 감), 녹음 중에만
+        if (s.running) s.sourceNote?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
         if (!s.running) transferLine(transfer)?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) }
         s.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
     }
+}
+
+/** "처프 창" 버튼의 보조 글. */
+private fun windowLabel(w: SweepWindow): String = when (w) {
+    SweepWindow.TUKEY -> "Tukey 창(양 끝 10%)"
+    SweepWindow.HANN -> "한 창"
+    SweepWindow.NONE -> "창 없음"
+}
+
+/** "녹음 음원" 버튼의 보조 글. */
+private fun sourceLabel(s: RecordSource): String = when (s) {
+    RecordSource.UNPROCESSED -> "UNPROCESSED(가공 없음)"
+    RecordSource.VOICE_RECOGNITION -> "음성 인식(VOICE_RECOGNITION)"
+    RecordSource.AUTO -> "자동(기기 지원 표시를 따름)"
 }
 
 /** 녹음하지 않을 때의 폰으로 보내기 한 줄(전송 설계 §2). 할 말이 없으면 null. */

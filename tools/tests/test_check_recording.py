@@ -88,6 +88,13 @@ class CheckRecordingTest(unittest.TestCase):
         lines, problems = cr.check(self.dir)
         self.assertEqual([], problems, lines)
 
+    def test_chosen_source_and_fallback_are_reported_but_not_problems(self):
+        make_recording(self.dir)
+        edit_rec(self.dir, lambda rec: rec["audio"].update(sourceRequested="unprocessed", sourceFallback="UNPROCESSED 녹음 초기화 실패"))
+        lines, problems = cr.check(self.dir)
+        self.assertEqual([], problems, lines)
+        self.assertTrue(any("unprocessed을 열지 못해 VOICE_RECOGNITION로 녹음함" in line for line in lines), lines)
+
     def test_unclosed_last_part_is_measured_by_file_size(self):
         make_recording(self.dir, last_closed=False)
         _, problems = cr.check(self.dir)

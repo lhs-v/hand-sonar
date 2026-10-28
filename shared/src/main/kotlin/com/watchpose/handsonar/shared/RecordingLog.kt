@@ -23,13 +23,16 @@ enum class StopReason(val id: String) {
  * (계획 6 고침 I1): [volumeOutputs]는 시작 때 이어진 외부 출력, [volumeTarget]은 맞추려던 값(그대로이거나 걸지 않았으면 null),
  * [volumeSkipped]는 녹음 볼륨을 걸지 않은 까닭, 녹음 중 외부 출력 목록이 바뀐 때([addOutputChange]), [volumeLeftover]는 이 녹음을 시작하기
  * 전에 앞 녹음이 남긴 볼륨 기록을 다룬 결과다. `sensors`(계획 6)는 맨 끝이고 센서 기록이 없으면 null이다.
+ *
+ * `audio`(2026-10-28): `source`는 실제로 연 녹음 음원, `sourceRequested`는 고른 음원(null = 고르는 기능 전), `sourceFallback`은 고른 음원을
+ * 열지 못해 VOICE_RECOGNITION으로 바꾼 까닭이다(바꾸지 않았으면 null). 기록은 녹음을 열기 전에 만들므로 연 뒤 [setSource]로 고친다.
  */
 class RecordingLog(
     private val app: String,
     private val device: String,
     private val android: String,
     private val start: ClockPoint,
-    private val source: String,
+    source: String,
     private val window: SweepWindow,
     private val amplitude: Float,
     private val volumeStream: String,
@@ -41,8 +44,12 @@ class RecordingLog(
     private val volumeOutputs: List<String> = emptyList(),
     private val volumeSkipped: String? = null,
     private val volumeLeftover: VolumeRestore? = null,
+    /** 워치 화면·원격 시작에서 고른 녹음 음원(2026-10-28). null = 고르는 기능 전의 기록. */
+    private val sourceRequested: RecordSource? = null,
 ) {
     private val lock = Any()
+    private var source = source
+    private var sourceFallback: String? = null
     private val recordClock = mutableListOf<LongArray>()
     private val playClock = mutableListOf<LongArray>()
     private val underruns = mutableListOf<LongArray>()
@@ -55,6 +62,14 @@ class RecordingLog(
     private var sensors: SensorReport? = null
     private var stop: ClockPoint? = null
     private var stopReason: StopReason? = null
+
+    /** 녹음을 연 뒤 실제 음원([actual], "UNPROCESSED" | "VOICE_RECOGNITION")과 고른 음원을 열지 못해 바꾼 까닭([fallback], 안 바꿨으면 null). */
+    fun setSource(actual: String, fallback: String?) {
+        synchronized(lock) {
+            source = actual
+            sourceFallback = fallback
+        }
+    }
 
     fun addRecordClock(frame: Long, elapsedNs: Long, framesRead: Long) {
         synchronized(lock) { recordClock += longArrayOf(frame, elapsedNs, framesRead) }
@@ -120,7 +135,14 @@ class RecordingLog(
                 "android" to android,
                 "start" to clock(start),
                 "stop" to stop?.let { clock(it) + ("reason" to stopReason?.id) },
-                "audio" to linkedMapOf<String, Any?>("rate" to SonarSpec.SAMPLE_RATE, "bits" to 16, "channels" to 1, "source" to source),
+                "audio" to linkedMapOf<String, Any?>(
+                    "rate" to SonarSpec.SAMPLE_RATE,
+                    "bits" to 16,
+                    "channels" to 1,
+                    "source" to source,
+                    "sourceRequested" to sourceRequested?.id,
+                    "sourceFallback" to sourceFallback,
+                ),
                 "tx" to linkedMapOf<String, Any?>(
                     "f0Hz" to SonarSpec.START_HZ,
                     "bandwidthHz" to SonarSpec.BANDWIDTH_HZ,

@@ -20,13 +20,34 @@ class SonarSpecTest {
 
     @Test
     fun windowIdsAreRecJsonNames() {
-        assertEquals(listOf("none", "hann"), SweepWindow.entries.map { it.id })
+        assertEquals(listOf("none", "hann", "tukey"), SweepWindow.entries.map { it.id })
     }
 
     @Test
-    fun defaultsAreHannAndHalfAmplitude() {
-        assertEquals(SweepWindow.HANN, SonarSpec.DEFAULT_WINDOW)
+    fun defaultsAreTukeyUnprocessedAndHalfAmplitude() {
+        // 2026-10-28: 한 창은 직접 경로 봉우리를 두 배로 넓혀 손 에코를 덮었고, WatchHand는 UNPROCESSED로 녹음했다
+        assertEquals(SweepWindow.TUKEY, SonarSpec.DEFAULT_WINDOW)
+        assertEquals(60, SonarSpec.TUKEY_RAMP_SAMPLES)
+        assertEquals(RecordSource.UNPROCESSED, SonarSpec.DEFAULT_RECORD_SOURCE)
         assertEquals(0.5f, SonarSpec.DEFAULT_AMPLITUDE)
+    }
+
+    @Test
+    fun windowAndSourceButtonsCycleThroughEveryChoice() {
+        assertEquals(SweepWindow.HANN, SonarSpec.nextWindow(SweepWindow.TUKEY))
+        assertEquals(SweepWindow.NONE, SonarSpec.nextWindow(SweepWindow.HANN))
+        assertEquals(SweepWindow.TUKEY, SonarSpec.nextWindow(SweepWindow.NONE))
+        assertEquals(RecordSource.VOICE_RECOGNITION, SonarSpec.nextRecordSource(RecordSource.UNPROCESSED))
+        assertEquals(RecordSource.AUTO, SonarSpec.nextRecordSource(RecordSource.VOICE_RECOGNITION))
+        assertEquals(RecordSource.UNPROCESSED, SonarSpec.nextRecordSource(RecordSource.AUTO))
+    }
+
+    @Test
+    fun recordSourceIdsAreRecJsonNames() {
+        assertEquals(listOf("auto", "unprocessed", "voice_recognition"), RecordSource.entries.map { it.id })
+        assertEquals(RecordSource.UNPROCESSED, RecordSource.of("unprocessed"))
+        assertEquals(null, RecordSource.of("UNPROCESSED"))
+        assertEquals(null, RecordSource.of(null))
     }
 
     @Test

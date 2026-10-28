@@ -20,10 +20,34 @@ object SonarSpec {
     const val DEFAULT_AMPLITUDE = 0.5f
 
     /**
-     * 처프 창의 처음 값은 한 창이다(설계 §5.2). 창 없음은 이음새 딸깍(80 Hz)과 10–11 kHz 울림이 들렸다(2026-10-27 실기기).
-     * 워치 설정에 저장된 창이 없을 때(새로 설치하거나 앱 데이터를 지운 뒤)만 쓰인다.
+     * 처프 창의 처음 값은 Tukey 창이다(2026-10-28). 창 없음은 이음새 딸깍(80 Hz)과 10–11 kHz 울림이 들렸고(2026-10-27 실기기), 그래서 쓰던
+     * 한 창은 대역폭을 깎아 직접 경로 봉우리를 두 배로 넓혔다(반높이 폭 34–85칸, 창 없음·공개 WatchHand 프로파일은 20–21칸). 넓은 봉우리가
+     * 손목 가까운 손가락 에코를 덮는다. Tukey 창은 양 끝 [TUKEY_RAMP_SAMPLES]만 줄여 봉우리 폭을 창 없음 가까이(시뮬레이션 24칸 대 22칸) 두고
+     * 들리는 대역(15 kHz 아래) 누설을 창 없음보다 약 49 dB 낮춘다. 워치 설정에 저장된 창이 없을 때(새로 설치하거나 앱 데이터를 지운 뒤)만 쓰인다.
      */
-    val DEFAULT_WINDOW: SweepWindow = SweepWindow.HANN
+    val DEFAULT_WINDOW: SweepWindow = SweepWindow.TUKEY
+
+    /** Tukey 창의 양 끝 경사 길이(샘플): 600샘플 처프의 10%씩(1.25 ms). PC `tools/profiles.py`의 송신 처프가 같은 값을 쓴다. */
+    const val TUKEY_RAMP_SAMPLES = 60
+
+    /** 워치 화면 "처프 창" 버튼이 도는 차례. */
+    val WINDOW_CHOICES: List<SweepWindow> = listOf(SweepWindow.TUKEY, SweepWindow.HANN, SweepWindow.NONE)
+
+    /** "처프 창" 버튼의 다음 값. */
+    fun nextWindow(current: SweepWindow): SweepWindow = WINDOW_CHOICES[(WINDOW_CHOICES.indexOf(current) + 1) % WINDOW_CHOICES.size]
+
+    /**
+     * 녹음 음원의 처음 값은 UNPROCESSED다(2026-10-28). WatchHand는 워치에서 UNPROCESSED로 녹음했다(§3.2). 워치8은 지원을 선언하지 않아 자동이면
+     * VOICE_RECOGNITION이 되고, 그 녹음은 공개 데이터보다 손 움직임 신호가 약했다. 열리지 않으면 워치가 VOICE_RECOGNITION으로 바꿔 녹음한다.
+     */
+    val DEFAULT_RECORD_SOURCE: RecordSource = RecordSource.UNPROCESSED
+
+    /** 워치 화면 "녹음 음원" 버튼이 도는 차례. */
+    val RECORD_SOURCE_CHOICES: List<RecordSource> = listOf(RecordSource.UNPROCESSED, RecordSource.VOICE_RECOGNITION, RecordSource.AUTO)
+
+    /** "녹음 음원" 버튼의 다음 값. */
+    fun nextRecordSource(current: RecordSource): RecordSource =
+        RECORD_SOURCE_CHOICES[(RECORD_SOURCE_CHOICES.indexOf(current) + 1) % RECORD_SOURCE_CHOICES.size]
 
     /** 워치 화면 "세기" 버튼의 다음 값: 10%씩 올리고 100% 다음은 10%로 돌아간다. */
     fun nextAmplitude(current: Float): Float {
@@ -61,4 +85,23 @@ object SonarSpec {
 enum class SweepWindow(val id: String) {
     NONE("none"),
     HANN("hann"),
+
+    /** 양 끝 [SonarSpec.TUKEY_RAMP_SAMPLES]만 반 코사인으로 올리고 내린다. */
+    TUKEY("tukey"),
+}
+
+/**
+ * 워치 녹음 음원 선택(2026-10-28). [id]는 rec.json의 `audio.sourceRequested`에 적는 이름이다. 실제로 연 음원은 `audio.source`에
+ * ("UNPROCESSED" | "VOICE_RECOGNITION") 적는다. [AUTO]는 기기가 UNPROCESSED 지원을 선언하면 그것, 아니면 VOICE_RECOGNITION이다(전부터의 방식).
+ */
+enum class RecordSource(val id: String) {
+    AUTO("auto"),
+    UNPROCESSED("unprocessed"),
+    VOICE_RECOGNITION("voice_recognition"),
+    ;
+
+    companion object {
+        /** rec.json·원격 시작의 이름에서. 모르는 이름이면 null. */
+        fun of(id: String?): RecordSource? = entries.firstOrNull { it.id == id }
+    }
 }

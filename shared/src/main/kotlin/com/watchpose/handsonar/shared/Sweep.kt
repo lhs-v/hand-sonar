@@ -10,17 +10,22 @@ import kotlin.math.sin
  * 위상 φ(t) = 2π(f0·t + ½·k·t²), k = 폭/길이라 순간 주파수가 18 kHz에서 21 kHz로 곧게 오른다.
  */
 object Sweep {
-    /** 진폭 1의 한 주기([SonarSpec.SWEEP_SAMPLES]개). HANN이면 대칭 한 창을 곱해 양 끝을 0으로 만든다. */
+    /**
+     * 진폭 1의 한 주기([SonarSpec.SWEEP_SAMPLES]개). HANN이면 대칭 한 창을 곱해 양 끝을 0으로 만든다. TUKEY면 양 끝 [SonarSpec.TUKEY_RAMP_SAMPLES]만
+     * 반 코사인 경사(0.5 − 0.5·cos(π·j/m), j = 끝에서 센 자리)를 곱하고 가운데는 그대로 둔다.
+     */
     fun wave(window: SweepWindow): FloatArray {
         val n = SonarSpec.SWEEP_SAMPLES
         val rate = SonarSpec.SAMPLE_RATE.toDouble()
         val slope = SonarSpec.BANDWIDTH_HZ / (n / rate)
+        val m = SonarSpec.TUKEY_RAMP_SAMPLES
         return FloatArray(n) { i ->
             val t = i / rate
             val phase = 2 * PI * (SonarSpec.START_HZ * t + 0.5 * slope * t * t)
             val w = when (window) {
                 SweepWindow.NONE -> 1.0
                 SweepWindow.HANN -> 0.5 - 0.5 * cos(2 * PI * i / (n - 1))
+                SweepWindow.TUKEY -> minOf(i, n - 1 - i).let { j -> if (j >= m) 1.0 else 0.5 - 0.5 * cos(PI * j / m) }
             }
             (sin(phase) * w).toFloat()
         }

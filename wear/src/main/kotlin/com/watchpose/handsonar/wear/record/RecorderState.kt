@@ -29,6 +29,8 @@ data class RecorderStatus(
     val folder: String = "",
     /** 센서 기록의 문제(못 엶·쓰기 실패·기기에 없는 센서, 계획 6). 없으면 null. 센서 기록이 실패해도 녹음은 이어 간다. */
     val sensorNote: String? = null,
+    /** 고른 녹음 음원(UNPROCESSED)을 열지 못해 VOICE_RECOGNITION으로 녹음 중이면 그 알림(2026-10-28). 없으면 null. */
+    val sourceNote: String? = null,
     val error: String? = null,
 )
 

@@ -3,7 +3,7 @@ import unittest
 import profiles  # 사용자 설치 numpy 경로도 여기서 붙는다
 
 import numpy as np  # noqa: E402
-from scipy.signal import butter, sosfiltfilt  # noqa: E402
+from scipy.signal import butter, hilbert, sosfiltfilt  # noqa: E402
 
 N = profiles.N
 
@@ -65,6 +65,39 @@ class ProfilesTest(unittest.TestCase):
         np.testing.assert_array_equal(expected, p.ok)
         np.testing.assert_array_equal(moves, p.moves)
         self.assertLessEqual(int(np.abs(p.drift).max()), profiles.TOL)
+
+    def test_tukey_template_tapers_only_the_ends(self):
+        # shared Sweep.wave(TUKEY)와 같은 식: 양 끝 60샘플만 0.5 − 0.5·cos(π·j/60)(j = 끝에서 센 자리), 가운데는 창 없음과 같다
+        tukey = profiles.tx_template("tukey", 0.5)
+        none = profiles.tx_template("none", 0.5)
+        self.assertIn("tukey", profiles.WINDOWS)
+        self.assertEqual(0.0, tukey[0])
+        self.assertEqual(0.0, tukey[-1])
+        np.testing.assert_array_equal(none[60:540], tukey[60:540])
+        i = np.arange(N)
+        t = i / profiles.RATE
+        wave = np.sin(2 * np.pi * (18_000 * t + 0.5 * (3_000 / (N / profiles.RATE)) * t * t))
+        for j in (1, 30, 59):
+            w = 0.5 - 0.5 * np.cos(np.pi * j / 60)
+            self.assertEqual(np.round(wave[j] * w * 0.5 * 32767), tukey[j])
+            self.assertEqual(np.round(wave[N - 1 - j] * w * 0.5 * 32767), tukey[N - 1 - j])
+
+    def test_tukey_direct_path_is_as_narrow_as_no_window(self):
+        # 한 창은 직접 경로 봉우리를 두 배로 넓혀 손 에코를 덮었다(2026-10-28): Tukey는 창 없음과 비슷하게 좁다
+        def width(window):
+            tx = profiles.tx_template(window, 0.5)
+            p = profiles.compute(np.tile(tx, 30), tx)
+            env = np.abs(hilbert(p.raw[:, 15]))
+            k = int(env.argmax())
+            half = env[k] / 2
+            lo, hi = k, k
+            while env[lo] > half:
+                lo -= 1
+            while env[hi] > half:
+                hi += 1
+            return hi - lo
+        self.assertLessEqual(width("tukey"), width("none") + 4)
+        self.assertGreater(width("hann"), 1.5 * width("tukey"))
 
     def test_profiles_match_reference(self):
         x, tx = received(np.full(40, 123), moving=True)
