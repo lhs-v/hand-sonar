@@ -22,6 +22,7 @@
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,16 +51,17 @@ def subprocess_run(args):
 
 
 def devices(run, adb):
-    """{모델: serial}. `adb devices -l`에서 상태가 device인 줄만. 같은 모델이 두 번 보이면(mDNS 이름과 IP:포트) 앞의 것."""
+    """{모델: serial}. `adb devices -l`에서 상태가 device인 줄만. 같은 모델이 두 번 보이면(mDNS 이름과 IP:포트) 앞의 것.
+    serial에 공백이 들 수 있다(다시 페어링한 워치의 mDNS 이름 "adb-… (2)._adb-tls-connect._tcp"): 상태 칸 앞 전체를 serial로 본다."""
     _, out = run([adb, "devices", "-l"])
     found = {}
     for line in out.splitlines()[1:]:
-        fields = line.split()
-        if len(fields) < 2 or fields[1] != "device":
+        m = re.match(r"(\S.*?)\s+device(?:\s+(.*))?$", line.rstrip())
+        if not m:
             continue
-        model = next((f.split(":", 1)[1].replace("_", "-") for f in fields[2:] if f.startswith("model:")), None)
+        model = next((f.split(":", 1)[1].replace("_", "-") for f in (m.group(2) or "").split() if f.startswith("model:")), None)
         if model and model not in found:
-            found[model] = fields[0]
+            found[model] = m.group(1)
     return found
 
 

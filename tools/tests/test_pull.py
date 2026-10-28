@@ -76,6 +76,16 @@ def short(pulled):
 
 
 class PullTest(unittest.TestCase):
+    def test_device_serial_may_contain_a_space(self):
+        # 다시 페어링한 워치는 mDNS 이름에 " (2)"가 붙는다(2026-10-28): 공백으로만 쪼개면 상태 칸을 못 찾아 워치를 놓쳤다
+        out = """List of devices attached
+10.0.0.5:40001         device product:fold model:SM_F971N device:f transport_id:4
+adb-AAAA (2)._adb-tls-connect._tcp device product:wear model:SM_L320 device:w transport_id:10
+adb-BBBB (3)._adb-tls-connect._tcp offline
+"""
+        self.assertEqual({"SM-F971N": "10.0.0.5:40001", "SM-L320": "adb-AAAA (2)._adb-tls-connect._tcp"},
+                         pull.devices(lambda args: (0, out), "adb"))
+
     def test_picks_devices_by_model_and_pulls_only_new_or_changed_files(self):
         fake = FakeAdb({
             WATCH: {WATCH_DIR: {"20990101-000000": {"rec.json": 10, "part-000.wav": 300},
