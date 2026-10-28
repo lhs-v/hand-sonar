@@ -88,6 +88,8 @@ class RecorderService : LifecycleService() {
             startInForeground() // startForegroundService 뒤 몇 초 안에 해야 하므로 맨 먼저 한다
         } catch (e: Exception) {
             RecorderState.update { it.copy(running = false, error = "포그라운드 시작 실패: ${e.message ?: e.javaClass.simpleName}") }
+            // 녹음은 열리지 않았다: 맨 앞에서 멈춘 보내기를 다시 잇는다. 백그라운드라 서비스를 못 띄워도 멈춤 표시는 풀린다
+            TransferService.start(this)
             stopSelf()
             return
         }

@@ -30,7 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 녹음을 폰으로 보내는 포그라운드 서비스(전송 설계 §2, 종류 dataSync). [start]가 띄우고, 할 일이 끝나면 스스로 멈춘다.
  * 작업 스레드 하나가 안 보낸 녹음(오래된 것부터)마다: 목록 요청 → 폰에 없는 파일마다 채널 하나 → 목록 요청 한 번 더(빈 답 = 폰의 확인)
  * → "보냄" 기록([HandSonarApp.sentLog]). 녹음 폴더의 파일은 지우지 않는다.
- * 녹음 중에는 보내지 않는다: 녹음 서비스가 시작할 때 [holdForRecording]을 부르면 16 KB마다 그 표시를 보고 보내던 채널을 끊고 멈춘다.
+ * 녹음 중에는 보내지 않는다: 녹음 서비스가 시작할 때 [holdForRecording]을 부르면 지금 채널을 바로 끊고, 쓰기·폰의 답·결과를 기다리는
+ * 모든 곳이 0.5 s마다 그 표시를 보므로 곧 멈춘다(녹음마다, "보냄"으로 적기 직전에도 본다).
  * 실패(폰을 못 찾음·답 없음·파일 실패)가 이어지면 [RETRY_MS] 쉬고 [MAX_FAILED_ROUNDS]번까지 다시 한다. 그 뒤는 다음 녹음 정지나 화면을 열 때다.
  * 화면이 꺼져도 끝까지 가도록 부분 깨움을 잡는다. 안드로이드 15+의 dataSync 하루 6시간이 다 차면 [onTimeout]에서 바로 멈춘다.
  * 시작 요청이 겹치면 지금 도는 차례가 끝난 뒤 한 번 더 돈다(주 스레드의 busy·again으로만 정한다).
@@ -39,7 +40,6 @@ class TransferService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     @Volatile private var stopping = false
-    @Volatile private var sender: PhoneSender? = null
 
     // 아래 셋은 주 스레드에서만 읽고 쓴다
     private var busy = false
@@ -78,7 +78,7 @@ class TransferService : Service() {
 
     override fun onDestroy() {
         stopping = true
-        sender?.abort()
+        activeSender?.abort()
         executor.shutdownNow()
         TransferState.update { it.copy(active = false, file = "", bytes = 0L, total = 0L) }
         super.onDestroy()
@@ -110,14 +110,14 @@ class TransferService : Service() {
             setReferenceCounted(false)
             acquire(WAKE_LOCK_TIMEOUT_MS)
         }
-        val link = PhoneSender(this)
-        sender = link
+        val link = PhoneSender(this, ::stop)
+        activeSender = link
         try {
             finishRun(app, if (link.open()) loop(app, link) else "데이터 레이어를 열지 못함 — 다음에 다시 보냄")
         } catch (e: Exception) {
             finishRun(app, "보내기 오류: ${e.message ?: e.javaClass.simpleName}")
         } finally {
-            sender = null
+            activeSender = null
             link.close()
             if (wake.isHeld) wake.release()
         }
@@ -133,11 +133,13 @@ class TransferService : Service() {
             if (pending.isEmpty()) return if (sent > 0) "폰으로 다 보냄(녹음 ${sent}개)" else null
             TransferState.update { it.copy(active = true, pending = pending.size, message = null) }
             val phone = link.findPhone()
+            if (held()) return HELD_MESSAGE
             var failure: String? = if (phone == null) "폰을 찾지 못함(블루투스 연결과 폰 앱을 확인)" else null
             if (phone != null) {
                 for (name in pending) {
                     when (val r = sendRecording(link, phone.id, File(app.recordingsRoot, name))) {
                         Sent.Complete -> {
+                            if (held()) return HELD_MESSAGE // 적기 직전에도 본다: 그사이 시작된 녹음 폴더를 "보냄"으로 적지 않게
                             app.sentLog.add(name)
                             sent++
                             failedRounds = 0
@@ -162,22 +164,23 @@ class TransferService : Service() {
 
     /** 녹음 하나: 목록 요청 → 폰에 없는 파일만 보냄 → 목록 요청 한 번 더. 두 번째 답이 비어야 Complete(폰의 확인)다. */
     private fun sendRecording(link: PhoneSender, phone: String, dir: File): Sent {
+        if (held()) return Sent.Held
         val files = TransferRules.transferable((dir.listFiles() ?: emptyArray()).filter { it.isFile }.map { RecFile(it.name, it.length()) })
         if (files.isEmpty()) return Sent.Complete // 보낼 파일이 없는 폴더(시작하다 만 녹음): 폰에 묻지 않고 끝낸다
         val offer = Offer(dir.name, files)
-        val need = link.offer(phone, offer) ?: return Sent.Failed("폰이 답하지 않음")
+        val need = link.offer(phone, offer) ?: return if (held()) Sent.Held else Sent.Failed("폰이 답하지 않음")
         if (need.isEmpty()) return Sent.Complete
         for (f in files) {
             if (f.name !in need) continue
             if (held()) return Sent.Held
             TransferState.update { it.copy(file = f.name, bytes = 0L, total = f.size) }
-            when (val r = link.sendFile(phone, dir.name, File(dir, f.name), f.size, ::held) { b -> TransferState.update { it.copy(bytes = b) } }) {
+            when (val r = link.sendFile(phone, dir.name, File(dir, f.name), f.size) { b -> TransferState.update { it.copy(bytes = b) } }) {
                 FileResult.Done -> Unit
                 FileResult.Held -> return Sent.Held
                 is FileResult.Failed -> return Sent.Failed("${f.name}: ${r.reason}")
             }
         }
-        val left = link.offer(phone, offer) ?: return Sent.Failed("폰이 답하지 않음")
+        val left = link.offer(phone, offer) ?: return if (held()) Sent.Held else Sent.Failed("폰이 답하지 않음")
         return if (left.isEmpty()) Sent.Complete else Sent.Failed("폰에 아직 없는 파일 ${left.size}개")
     }
 
@@ -193,6 +196,9 @@ class TransferService : Service() {
     }
 
     private fun held(): Boolean = hold.get() || RecorderState.status.value.running
+
+    /** 데이터 레이어 기다림을 그만둘 때: 녹음 중이거나 서비스가 멈추는 중. */
+    private fun stop(): Boolean = held() || stopping
 
     private fun liveRecording(): String? = RecorderState.status.value.let { if (it.running) it.folder else null }
 
@@ -233,9 +239,16 @@ class TransferService : Service() {
         private const val HELD_MESSAGE = "녹음 중이라 보내기를 멈춤 — 녹음이 끝나면 다시 보냄"
         private val hold = AtomicBoolean(false)
 
-        /** 녹음 서비스가 시작할 때 맨 먼저 부른다: 보내던 파일을 끊고 서비스를 멈추게 한다(녹음 중에는 보내지 않는다). 다음 [start]가 푼다. */
+        /** 지금 도는 보내기 작업의 데이터 레이어 호출. [holdForRecording]이 그 채널을 바로 끊는다. */
+        @Volatile private var activeSender: PhoneSender? = null
+
+        /**
+         * 녹음 서비스가 시작할 때 맨 먼저 부른다(주 스레드): 보내던 채널을 바로 끊고 서비스를 멈추게 한다(녹음 중에는 보내지 않는다).
+         * 막힌 쓰기도 채널이 닫히면 풀린다. 다음 [start]가 표시를 푼다.
+         */
         fun holdForRecording() {
             hold.set(true)
+            activeSender?.abort()
         }
 
         /**

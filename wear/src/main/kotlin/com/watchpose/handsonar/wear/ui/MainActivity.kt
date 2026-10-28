@@ -21,9 +21,13 @@ import com.watchpose.handsonar.wear.transfer.TransferService
  * 허용돼 있지 않으면 시작하지 않고 화면에 이유를 보인다.
  * `autoStopMinutes`는 이번 녹음만 설정의 자동 정지를 대신한다(0 = 끔). 생략하면 설정을 따른다.
  * 화면이 보일 때마다(녹음 중이 아니면) 아직 폰이 확인하지 않은 녹음을 다시 보낸다(전송 설계 §2 "앱이 켜질 때"). 화면이 앞에 있어
- * 포그라운드 서비스 시작 제한에 걸리지 않는다.
+ * 포그라운드 서비스 시작 제한에 걸리지 않는다. 원격 시작으로 열렸을 때는 그 바로 뒤의 한 번은 띄우지 않는다: 녹음이 시작되는 순간에
+ * 보내기 서비스·데이터 레이어 호출이 겹치지 않게(녹음 서비스가 곧 멈추게 하겠지만 첫 1초의 CPU를 아낀다).
  */
 class MainActivity : ComponentActivity() {
+    /** 원격 시작을 막 보냈다: 바로 뒤 onStart에서 보내기를 띄우지 않는다. onResume에서 지워 그 뒤 화면 켜짐은 막지 않는다. */
+    private var skipTransferOnce = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val app = application as HandSonarApp
@@ -34,7 +38,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        if (skipTransferOnce) {
+            skipTransferOnce = false
+            return
+        }
         if (!RecorderState.status.value.running) TransferService.start(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        skipTransferOnce = false // onStart 없이 온 원격 시작(앞에 떠 있을 때의 onNewIntent)이 다음 화면 켜짐을 막지 않게
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -46,6 +59,7 @@ class MainActivity : ComponentActivity() {
     private fun remoteStart(intent: Intent) {
         if (!intent.getBooleanExtra(EXTRA_START, false) || RecorderState.status.value.running) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            skipTransferOnce = true
             RecorderService.start(this, intent.getIntExtra(RecorderService.EXTRA_AUTO_STOP_MINUTES, -1).takeIf { it >= 0 })
         } else {
             RecorderState.update { it.copy(error = "마이크 권한이 없어 원격 시작을 못 했습니다. 워치에서 녹음을 한 번 시작해 권한을 허용하세요") }
