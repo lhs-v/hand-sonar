@@ -2,12 +2,17 @@ package com.watchpose.handsonar.mobile.session
 
 import android.app.Application
 import android.content.Context
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import androidx.annotation.MainThread
 import androidx.lifecycle.LifecycleOwner
 import com.watchpose.handsonar.mobile.BuildConfig
+import com.watchpose.handsonar.mobile.audio.AudioOutputs
 import com.watchpose.handsonar.mobile.audio.MarkerFound
 import com.watchpose.handsonar.mobile.audio.MarkerPlayer
 import com.watchpose.handsonar.mobile.audio.PhoneMic
@@ -82,6 +87,8 @@ data class UiState(
     val selfCheckBusy: Boolean = false,
     val mediaVolume: Int = 0,
     val mediaMax: Int = 15,
+    /** 연결된 이어폰·블루투스 오디오 등 외부 출력의 이름(없으면 빈 목록). 표지음이 폰 스피커로 안 나갈 수 있어 준비 화면이 경고한다. */
+    val externalOutputs: List<String> = emptyList(),
     val freeGb: Double = 0.0,
     val extraRotation: Int = 0,
     /** 추적하는 손(워치를 찬 손). 준비 화면에서 고르고 다음 실행에도 남는다. */
@@ -136,12 +143,22 @@ class SessionController(private val app: Application) {
     private val mic = PhoneMic(app, ::onChirp) { message -> state.update { it.copy(micError = message) } }
     private var marker: MarkerPlayer? = null
 
+    /** 이어폰·블루투스 오디오가 꽂히고 빠질 때마다 [UiState.externalOutputs]를 다시 읽는다. */
+    private val outputCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) = refreshOutputs()
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) = refreshOutputs()
+    }
+
     init {
         // 추적하는 손은 다음 실행에도 남는다. 저장된 값을 모르면 왼손.
         val saved = prefs.getString(PREF_HAND, TrackedHand.LEFT.id)
         val hand = TrackedHand.entries.firstOrNull { it.id == saved } ?: TrackedHand.LEFT
         camera.trackedHand = hand
         state.update { it.copy(trackedHand = hand) }
+        // 외부 출력 감시는 앱 수명 동안 이어 가므로(조정자가 앱 하나에 하나) 풀지 않는다. 시작 때 현재 목록을 한 번 채운다.
+        audioManager?.registerAudioDeviceCallback(outputCallback, Handler(Looper.getMainLooper()))
+        refreshOutputs()
     }
 
     @Volatile private var lastHandNs = 0L
@@ -636,6 +653,11 @@ class SessionController(private val app: Application) {
                 freeGb = store.freeBytes() / 1e9,
             )
         }
+    }
+
+    private fun refreshOutputs() {
+        val names = AudioOutputs.externalNames(audioManager)
+        state.update { it.copy(externalOutputs = names) }
     }
 
     private companion object {

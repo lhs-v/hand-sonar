@@ -39,7 +39,7 @@
    - `adb -s <워치> install -r wear/build/outputs/apk/debug/wear-debug.apk`
    - `adb -s <폰> install -r mobile/build/outputs/apk/debug/mobile-debug.apk`
 2. 워치 앱에서 녹음을 시작합니다. 미디어 볼륨이 0이면 시작하지 않습니다.
-3. 폰을 가로로 세우고(폴드는 펼쳐서) 정면 카메라가 손을 보게 둡니다. 표지음이 나가도록 폰 미디어 볼륨을 올립니다. 준비 화면에서 추적할 손(워치를 찬 손)을 고르고 시작합니다.
+3. 폰을 가로로 세우고(폴드는 펼쳐서) 정면 카메라가 손을 보게 둡니다. 표지음은 앱이 낼 때만 미디어 볼륨을 잠깐 올렸다 되돌립니다. 이어폰·블루투스 오디오는 빼 두는 편이 안전합니다. 준비 화면에서 추적할 손(워치를 찬 손)을 고르고 시작합니다.
 4. 화면 안내대로 손을 움직입니다. 끝나면 요약이 나옵니다.
 5. 데이터는 각 기기의 `Android/data/com.watchpose.handsonar/files/` 아래에 남습니다(워치 `recordings/`, 폰 `sessions/`). `adb pull`로 PC에 가져옵니다.
 

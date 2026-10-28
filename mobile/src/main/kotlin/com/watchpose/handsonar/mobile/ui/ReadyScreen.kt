@@ -31,7 +31,8 @@ import com.watchpose.handsonar.shared.ChirpHeard
 /**
  * 준비 화면(설계 §6.1-1): 추적하는 손(워치를 찬 손, "추적" 버튼으로 왼손·오른손을 고름)이 보이는지, 워치 처프가 들리는지,
  * 표지음 자기 확인이 됐는지. 손·표지음이 녹색이고 장치에 오류가 없으면 시작 버튼이 켜진다.
- * 워치 처프가 안 들리면 확인 창을 거쳐 시작할 수 있다.
+ * 워치 처프가 안 들리면 확인 창을 거쳐 시작할 수 있다. 이어폰·블루투스 오디오가 연결돼 있으면 경고만 띄운다(표지음이 스피커로 안 나가면
+ * 표지음 자기 확인이 녹색이 안 돼 시작이 막힌다).
  */
 @Composable
 fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Unit) {
@@ -70,7 +71,7 @@ fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Un
                     ui.selfCheckBusy -> "확인 중…"
                     self == null -> "아직 — 표지음 시험을 누르세요"
                     self.found -> "확인됨 (%.0f)".format(self.ratio ?: 0.0)
-                    else -> "못 들음 — 미디어 볼륨을 올리세요"
+                    else -> "못 들음 — 이어폰·블루투스 오디오를 빼고 다시 시험하세요"
                 },
                 when {
                     self?.found == true -> Level.OK
@@ -78,7 +79,12 @@ fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Un
                     else -> Level.BAD
                 },
             )
-            if (ui.devicesOpen && ui.mediaVolume == 0) WarningText("미디어 볼륨이 0이라 표지음이 나가지 않습니다")
+            if (ui.externalOutputs.isNotEmpty()) {
+                WarningText(
+                    "이어폰·블루투스 오디오가 연결돼 있습니다(${ui.externalOutputs.joinToString(", ")}) — " +
+                        "표지음은 폰 스피커로 냅니다. 표지음 시험이 실패하면 빼 주세요",
+                )
+            }
             if (ui.devicesOpen && ui.freeGb < 1.0) WarningText("남은 저장 공간이 1 GB 아래입니다(%.1f GB)".format(ui.freeGb))
             ui.micError?.let { WarningText(it) }
             ui.error?.let { WarningText(it) }
@@ -108,7 +114,7 @@ fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Un
                 OutlinedButton(onClick = c::showRecords) { Text("기록") }
             }
             Text(
-                "미디어 볼륨 ${ui.mediaVolume}/${ui.mediaMax} · 저장 공간 %.1f GB".format(ui.freeGb),
+                "미디어 볼륨 ${ui.mediaVolume}/${ui.mediaMax} (표지음 때만 잠깐 올림) · 저장 공간 %.1f GB".format(ui.freeGb),
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
