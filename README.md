@@ -29,8 +29,8 @@
 1. `python -I tools/pull.py` — 두 기기의 녹음·세션 폴더를 adb로 받습니다. 기기는 모델(워치 SM-L320, 폰 SM-F971N)로 찾고, `--watch`·`--phone`으로 serial을 줄 수 있습니다.
 2. `python -I tools/align.py` — 폰 표지음으로 워치 샘플 번호와 폰 시각을 맞춥니다(`align.json`).
 3. `python -I tools/profiles.py` — 공개 데이터(WatchHand)와 같은 처리로 에코 프로파일을 만듭니다(`profiles.npy`, `diff_profiles.npy`, `rows.npz`).
-4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`).
-5. `python -I tools/pairs.py` — 카메라 프레임마다 프로파일 줄을 짝짓습니다(`pairs.csv`).
+4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`). 지연이 1프레임(33 ms) 밖이거나 상관 봉우리가 문턱(0.1) 아래면 맞춤을 확인하지 못한 세션으로 적고 끝 코드 1로 끝납니다.
+5. `python -I tools/pairs.py` — 카메라 프레임마다 프로파일 줄을 짝짓습니다(`pairs.csv`). 지연이 1프레임 안이고 상관이 문턱 이상인 세션만, 그리고 `sync.json`이 지금의 `align.json`·`rows.npz`·`landmarks.csv`에서 잰 것일 때만 짝짓습니다. 아니면 `pairs.csv`를 쓰지 않고(옛 것은 `pairs.stale.csv`로 바꿈) 끝 코드 1로 끝납니다.
 6. `python -I tools/compare.py <세션>` — 공개 데이터 왼손 표본과 나란히 그린 그림입니다(`compare.png`, 표본 위치는 `--public`).
 
 ## 설치와 사용

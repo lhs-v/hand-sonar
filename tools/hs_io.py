@@ -241,6 +241,7 @@ def read_prompts(folder):
 
 LANDMARK_COLUMNS = 130  # frameNs, hands, handedness, score + 21점 × (x, y, z) × (화면, 세계)
 WRIST_JUMP = 0.1  # 손이 둘 보인 줄에서 손목(점 0)이 앞 줄보다 화면 폭의 10% 넘게 뛰면 다른 손을 고른 것으로 본다(30 fps에서 1 m/s ≈ 0.07)
+WRIST_MAX_AGE_SEC = 0.5  # 마지막으로 받아들인 손목이 이보다 오래면 견주지 않는다(손이 오래 안 보였다 돌아오면 자리가 달라도 정상이다)
 
 
 @dataclass
@@ -251,7 +252,7 @@ class Landmarks:
     tracked: np.ndarray  # (M,) 추적하는 손이 있음
     image: np.ndarray  # (M, 21, 3) x·y는 회전·거울 뒤 프레임 기준 0..1(조금 넘을 수 있음), z는 손목 기준 상대 깊이
     world: np.ndarray  # (M, 21, 3) 손 중심이 원점인 미터 좌표
-    valid: np.ndarray  # (M,) 추적하는 손이 있고, 손이 둘 보인 줄이면 손목이 앞 줄과 이어짐
+    valid: np.ndarray  # (M,) 추적하는 손이 있고, 손이 둘 보인 줄이면 손목이 0.5 s 안의 앞 줄과 이어짐
     dropped: int  # 열이 130개가 아니라(끝이 잘림) 버린 줄 수
 
 
@@ -279,13 +280,14 @@ def read_landmarks(folder):
     tracked = np.array(tracked, dtype=bool)
     hands = np.array(hands, dtype=np.int64)
     valid = tracked.copy()
-    last = None
+    last, last_ns = None, 0
     for i in np.flatnonzero(tracked):
         wrist = points[i, 0, 0, :2]
-        if hands[i] >= 2 and last is not None and float(np.hypot(*(wrist - last))) > WRIST_JUMP:
+        recent = last is not None and frame_ns[i] - last_ns <= WRIST_MAX_AGE_SEC * 1e9
+        if hands[i] >= 2 and recent and float(np.hypot(*(wrist - last))) > WRIST_JUMP:
             valid[i] = False
             continue
-        last = wrist
+        last, last_ns = wrist, frame_ns[i]
     return Landmarks(np.array(frame_ns, dtype=np.int64), hands, tracked, points[:, 0], points[:, 1], valid, dropped)
 
 
@@ -339,6 +341,15 @@ def sha256(path):
         for block in iter(lambda: f.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def retire(path):
+    """옛 결과 path가 있으면 지우지 않고 '<이름>.stale<확장자>'로 바꾼다(학습이 옛 결과를 집지 않게). 바꿨으면 True."""
+    if not os.path.exists(path):
+        return False
+    root, ext = os.path.splitext(path)
+    os.replace(path, root + ".stale" + ext)
+    return True
 
 
 def guarded(name, fn, *args):
