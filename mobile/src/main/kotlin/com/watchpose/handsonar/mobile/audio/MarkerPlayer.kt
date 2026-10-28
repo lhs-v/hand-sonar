@@ -67,7 +67,8 @@ class MarkerPlayer(context: Context) : AutoCloseable {
      * play()를 부른 직후의 elapsedNs를 돌려준다(실제로 소리가 난 시각은 폰 마이크 녹음에서 찾는다).
      */
     fun play(): Long {
-        raiseVolume()
+        // 볼륨 바꿈은 오디오 서비스가 따로 적용하므로, 방금 올렸으면 40 ms 표지음 앞부분이 옛 볼륨으로 나가지 않게 잠깐 기다린다
+        if (raiseVolume()) SystemClock.sleep(VOLUME_SETTLE_MS)
         try {
             runCatching { track.stop() }
             track.reloadStaticData()
@@ -84,25 +85,30 @@ class MarkerPlayer(context: Context) : AutoCloseable {
         track.release()
     }
 
-    /** 미디어 볼륨이 목표보다 낮으면 목표로 올리고 원래 값을 기억한다. 못 올려도 예외는 내지 않는다. */
-    private fun raiseVolume() {
-        val am = audioManager ?: return
+    /**
+     * 미디어 볼륨이 목표보다 낮으면 목표로 올리고 원래 값을 기억한다. 이번에 올렸으면 true.
+     * 못 올려도 예외는 내지 않는다.
+     */
+    private fun raiseVolume(): Boolean {
+        val am = audioManager ?: return false
         try {
             val now = am.getStreamVolume(AudioManager.STREAM_MUSIC)
             if (raisedVolume != NOT_RAISED) {
-                if (now == raisedVolume) return // 앞 표지음 때 올린 채 그대로: 원래 값은 그대로 기억한다
+                if (now == raisedVolume) return false // 앞 표지음 때 올린 채 그대로: 원래 값은 그대로 기억한다
                 raisedVolume = NOT_RAISED // 그새 사용자가 바꿨다: 지금 값을 새 원래 값으로 본다
             }
             val target = targetVolume(am.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
-            if (now >= target) return
+            if (now >= target) return false
             am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0) // 0: 볼륨 막대 같은 화면 표시 없음
             savedVolume = now
             raisedVolume = target
             // 기기가 한도를 두면 목표보다 낮게 받아들일 수 있다: 되돌릴 때 비교할 값은 시스템이 실제로 가진 값
             val after = am.getStreamVolume(AudioManager.STREAM_MUSIC)
             if (after != now) raisedVolume = after
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "미디어 볼륨을 못 올림(표지음은 그대로 냄)", e)
+            return false
         }
     }
 
@@ -137,6 +143,9 @@ class MarkerPlayer(context: Context) : AutoCloseable {
 
         /** 표지음을 낸 뒤 볼륨을 되돌리기까지. 40 ms 소리와 재생 지연이 끝나고도 남는 시간. */
         const val RESTORE_DELAY_MS = 600L
+
+        /** 볼륨을 방금 올렸을 때 표지음을 내기 전에 기다리는 시간. 오디오 서비스가 새 볼륨을 적용하고도 남는 시간. */
+        const val VOLUME_SETTLE_MS = 50L
 
         /** 최대 볼륨이 [max]단계인 기기에서 표지음을 낼 때 맞추는 미디어 볼륨. */
         fun targetVolume(max: Int): Int = (max * TARGET_NUM + TARGET_DEN - 1) / TARGET_DEN

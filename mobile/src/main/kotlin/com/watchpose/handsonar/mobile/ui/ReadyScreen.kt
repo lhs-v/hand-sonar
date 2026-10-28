@@ -71,7 +71,7 @@ fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Un
                     ui.selfCheckBusy -> "확인 중…"
                     self == null -> "아직 — 표지음 시험을 누르세요"
                     self.found -> "확인됨 (%.0f)".format(self.ratio ?: 0.0)
-                    else -> "못 들음 — 미디어 볼륨을 올리세요"
+                    else -> "못 들음 — 이어폰·블루투스 오디오를 빼고 다시 시험하세요"
                 },
                 when {
                     self?.found == true -> Level.OK
