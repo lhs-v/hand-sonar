@@ -254,11 +254,12 @@ class Landmarks:
     world: np.ndarray  # (M, 21, 3) 손 중심이 원점인 미터 좌표
     valid: np.ndarray  # (M,) 추적하는 손이 있고, 손이 둘 보인 줄이면 손목이 0.5 s 안의 앞 줄과 이어짐
     dropped: int  # 열이 130개가 아니라(끝이 잘림) 버린 줄 수
+    score: np.ndarray  # (M,) 추적하는 손의 판정 점수(MediaPipe 손잡이 점수, 학습 설계 §3-1 하한 0.5). 손이 없으면 nan
 
 
 def read_landmarks(folder):
     """landmarks.csv(설계 §7.2·§8.1). 열이 130개가 아닌 줄은 버린다. 데이터 줄 번호가 곧 영상 프레임 번호인지는 pairs.py가 meta로 따진다."""
-    frame_ns, hands, tracked, values, dropped = [], [], [], [], 0
+    frame_ns, hands, tracked, values, scores, dropped = [], [], [], [], [], 0
     with open(os.path.join(folder, "landmarks.csv"), encoding="utf-8", newline="") as f:
         reader = csv.reader(f)
         next(reader, None)
@@ -268,6 +269,7 @@ def read_landmarks(folder):
                     raise ValueError
                 has = row[2] != ""
                 v = [float(s) for s in row[4:]] if has else [np.nan] * (LANDMARK_COLUMNS - 4)
+                score = float(row[3]) if has else np.nan
                 t, h = int(row[0]), int(row[1])
             except ValueError:
                 dropped += 1
@@ -276,6 +278,7 @@ def read_landmarks(folder):
             hands.append(h)
             tracked.append(has)
             values.append(v)
+            scores.append(score)
     points = np.array(values, dtype=np.float64).reshape(-1, 2, 21, 3)
     tracked = np.array(tracked, dtype=bool)
     hands = np.array(hands, dtype=np.int64)
@@ -288,7 +291,8 @@ def read_landmarks(folder):
             valid[i] = False
             continue
         last, last_ns = wrist, frame_ns[i]
-    return Landmarks(np.array(frame_ns, dtype=np.int64), hands, tracked, points[:, 0], points[:, 1], valid, dropped)
+    return Landmarks(np.array(frame_ns, dtype=np.int64), hands, tracked, points[:, 0], points[:, 1], valid, dropped,
+                     np.array(scores, dtype=np.float64))
 
 
 def chosen(data, names=()):
