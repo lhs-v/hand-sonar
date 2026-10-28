@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.content.ContextCompat
 import com.watchpose.handsonar.wear.HandSonarApp
+import com.watchpose.handsonar.wear.record.RecordVolumeKeeper
 import com.watchpose.handsonar.wear.record.RecorderService
 import com.watchpose.handsonar.wear.record.RecorderState
 import com.watchpose.handsonar.wear.transfer.TransferService
@@ -24,6 +25,7 @@ import com.watchpose.handsonar.wear.transfer.TransferService
  * 화면이 보일 때마다(녹음 중이 아니면) 아직 폰이 확인하지 않은 녹음을 다시 보낸다(전송 설계 §2 "앱이 켜질 때"). 화면이 앞에 있어
  * 포그라운드 서비스 시작 제한에 걸리지 않는다. 원격 시작으로 열렸을 때는 그 바로 뒤의 한 번은 띄우지 않는다: 녹음이 시작되는 순간에
  * 보내기 서비스·데이터 레이어 호출이 겹치지 않게(녹음 서비스가 곧 멈추게 하겠지만 첫 1초의 CPU를 아낀다).
+ * 화면이 보일 때 녹음 중이 아니면, 앞 녹음에서 앱이 죽어 되돌리지 못한 녹음 볼륨도 되돌린다(계획 6, [RecordVolumeKeeper]).
  */
 class MainActivity : ComponentActivity() {
     /** 원격 시작을 막 보냈다: 바로 뒤 onStart에서 보내기를 띄우지 않는다. onResume에서 지워 그 뒤 화면 켜짐은 막지 않는다. */
@@ -39,6 +41,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        // 녹음 중 앱이 죽어 녹음 볼륨이 올라간 채면 되돌린다(바꿔 둔 것이 없으면 할 일 없음)
+        if (!RecorderState.status.value.running) (application as HandSonarApp).volumeKeeper.restore()
         if (skipTransferOnce) {
             skipTransferOnce = false
             return

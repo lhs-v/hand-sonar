@@ -21,6 +21,7 @@ import com.watchpose.handsonar.shared.ClockPoint
 import com.watchpose.handsonar.shared.PartWriter
 import com.watchpose.handsonar.shared.RecordingLog
 import com.watchpose.handsonar.shared.SensorPlan
+import com.watchpose.handsonar.shared.SonarSpec
 import com.watchpose.handsonar.shared.StopReason
 import com.watchpose.handsonar.shared.StorageBudget
 import com.watchpose.handsonar.shared.Sweep
@@ -48,6 +49,9 @@ import java.util.Locale
  * 정지·오류·저장 공간 부족이면 녹음과 재생을 멈추고 마지막 조각과 rec.json을 닫는다. 오디오 스레드의 오류는 주 스레드로 넘겨 끝낸다.
  * 자동 정지(설계 §5.1): 시작 인텐트의 분(없으면 설정의 분)이 지나면 틱이 `timer`로 같은 정지 경로를 한 번 타고, 오류가 아니라서 정지 진동이 난다(0이면 하지 않는다).
  * 미디어 볼륨이 0이면 시작하지 않는다(설계 §5.4): 처프가 나가지 않아 녹음 전체가 쓸모없고, 워치 미디어 볼륨은 adb로 바꿀 수 없어 다시 일어나기 쉽다.
+ * 녹음 볼륨(전송 설계 §8, 계획 6): 설정에서 단계를 골랐으면 폴더를 만들기 전에 미디어 볼륨을 그 단계로 맞추고([RecordVolumeKeeper], 원래 값을
+ * 먼저 적어 둠) 볼륨 0 막기는 맞춘 뒤의 값으로 한다. 멈출 때(재생이 멈춘 뒤)와 시작 실패 때 되돌린다. 고른 값·실제 값·원래 값·되돌린 값과
+ * 녹음 중 바뀐 때를 rec.json `volume`에 적는다.
  * 폰으로 보내기(전송 설계 §2): 시작할 때 맨 먼저 보내기를 멈추게 하고(녹음 중에는 보내지 않는다), 멈출 때(이유와 상관없이)와
  * 시작하다 실패할 때 포그라운드를 내려놓기 전에 [TransferService]를 띄운다.
  * 센서 기록(전송 설계 §8, 계획 6): 녹음·재생을 다 연 뒤에 [SensorRecorder]를 시작하고(소리 녹음을 방해하지 않게), 멈출 때 정지 시각을 잰 뒤
@@ -114,15 +118,28 @@ class RecorderService : LifecycleService() {
             failToStart("저장 공간이 부족합니다(남은 녹음 ${String.format(Locale.ROOT, "%.1f", StorageBudget.minutesLeft(free))}분)")
             return
         }
-        // 미디어 볼륨 0이면 처프가 녹음되지 않아 그 녹음 전체를 못 쓴다. 폴더를 만들기 전에 막는다(원격 시작도 서비스에서 막히므로 같은 길을 탄다).
+        val settings = (application as HandSonarApp).settings.state.value
+        // 녹음 볼륨(전송 설계 §8): 앞 녹음에서 앱이 죽어 못 되돌린 볼륨을 먼저 되돌린 뒤 지금 볼륨을 원래 값으로 읽고, 고른 단계로 맞춘다.
         val am = getSystemService(AudioManager::class.java)
-        if (am.getStreamVolume(AudioManager.STREAM_MUSIC) == 0) {
-            failToStart("미디어 볼륨이 0이라 처프가 나가지 않습니다. 워치에서 미디어 볼륨을 올린 뒤 다시 시작하세요")
+        val keeper = (application as HandSonarApp).volumeKeeper
+        keeper.restore()
+        val originalVolume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val volumeMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val targetVolume = SonarSpec.recordVolumeTarget(settings.recordVolume, originalVolume, volumeMax)
+        val volume = keeper.apply(targetVolume, originalVolume)
+        // 미디어 볼륨 0이면 처프가 녹음되지 않아 그 녹음 전체를 못 쓴다. 폴더를 만들기 전에 막는다(원격 시작도 서비스에서 막히므로 같은 길을 탄다).
+        if (volume == 0) {
+            failToStart(
+                if (settings.recordVolume == 0) {
+                    "미디어 볼륨이 0이라 처프가 나가지 않습니다. 워치에서 미디어 볼륨을 올린 뒤 다시 시작하세요"
+                } else {
+                    "미디어 볼륨을 고른 단계 ${targetVolume}에 맞추지 못했습니다(지금 0). 워치에서 미디어 볼륨을 올린 뒤 다시 시작하세요"
+                },
+            )
             return
         }
         val dir = File(root, LocalDateTime.now().format(STAMP)).apply { mkdirs() }
         folder = dir
-        val settings = (application as HandSonarApp).settings.state.value
         val parts = PartWriter(dir)
         writer = parts
         val rec = SonarRecorder(this, parts, onClock = ::onRecordClock, onError = ::onAudioError)
@@ -136,8 +153,10 @@ class RecorderService : LifecycleService() {
             window = settings.window,
             amplitude = settings.amplitude,
             volumeStream = "music",
-            volumeIndex = am.getStreamVolume(AudioManager.STREAM_MUSIC),
-            volumeMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+            volumeIndex = volume,
+            volumeMax = volumeMax,
+            volumeChoice = settings.recordVolume.takeIf { it > 0 },
+            volumeOriginal = originalVolume,
         )
         recorder = rec
         rec.start()?.let {
@@ -162,18 +181,21 @@ class RecorderService : LifecycleService() {
                 autoStopAtElapsedMs = autoStopAtMs,
                 minutesLeft = StorageBudget.minutesLeft(free),
                 storageWarning = StorageBudget.level(free) == StorageBudget.Level.WARN,
-                volumeIndex = am.getStreamVolume(AudioManager.STREAM_MUSIC),
-                volumeMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+                volumeIndex = volume,
+                volumeMax = volumeMax,
+                volumeRestoreTo = keeper.pending,
                 folder = dir.name,
                 sensorNote = sensors?.note(),
             )
         }
         haptics.start()
-        ticker = lifecycleScope.launch(Dispatchers.Default) { tickLoop() }
+        ticker = lifecycleScope.launch(Dispatchers.Default) { tickLoop(volume) }
     }
 
-    private suspend fun tickLoop() {
+    /** [startVolume]은 녹음을 시작할 때의 미디어 볼륨이다. 그 뒤 바뀌면 rec.json `volume.changes`에 적는다. */
+    private suspend fun tickLoop(startVolume: Int) {
         var lastUnderruns = 0
+        var lastVolume = startVolume
         var ticks = 0
         while (currentCoroutineContext().isActive && !finished) {
             delay(TICK_MS)
@@ -199,13 +221,18 @@ class RecorderService : LifecycleService() {
                 return
             }
             val am = getSystemService(AudioManager::class.java)
+            val volume = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            if (volume != lastVolume) { // 녹음 중 사람이 볼륨을 바꿨다: 볼륨별로 견줄 때 가려낼 수 있게 남긴다
+                l.addVolumeChange(SystemClock.elapsedRealtimeNanos(), volume)
+                lastVolume = volume
+            }
             RecorderState.update {
                 it.copy(
                     recordedFrames = rec.frames,
                     underruns = underruns,
                     minutesLeft = StorageBudget.minutesLeft(free),
                     storageWarning = level == StorageBudget.Level.WARN,
-                    volumeIndex = am.getStreamVolume(AudioManager.STREAM_MUSIC),
+                    volumeIndex = volume,
                     volumeMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
                     sensorNote = sensors?.note(),
                 )
@@ -252,7 +279,11 @@ class RecorderService : LifecycleService() {
         writer?.close()
         val stoppedAt = ClockPoint(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos()) // 소리가 멈춘 때(센서를 닫기 전)
         sensors?.stop() // 마지막 rec.json과 보내기 전에 CSV를 닫는다
-        log?.finish(stoppedAt, reason, writer?.parts.orEmpty())
+        val restored = (application as HandSonarApp).volumeKeeper.restore() // 재생이 멈춘 뒤 녹음 볼륨을 원래대로
+        log?.let {
+            it.finish(stoppedAt, reason, writer?.parts.orEmpty())
+            it.setVolumeRestored(restored)
+        }
         writeLog()
         // 진동은 포그라운드를 내려놓기 전에 낸다: 내려놓은 뒤의 백그라운드 진동은 무시될 수 있다(화면이 꺼진 자동 정지 끝).
         if (error == null) haptics.stop() else haptics.error()
@@ -267,6 +298,7 @@ class RecorderService : LifecycleService() {
         recorder?.stop()
         writer?.close()
         sensors?.stop() // 센서는 재생까지 연 뒤에 시작하므로 보통 없다
+        (application as HandSonarApp).volumeKeeper.restore() // 녹음 볼륨으로 바꿨으면 되돌린다(바꾸기 전 실패면 할 일 없음)
         folder?.let { dir -> if (dir.listFiles().isNullOrEmpty()) dir.delete() }
         haptics.error() // finish()와 같은 이유로 포그라운드를 내려놓기 전에 낸다
         TransferService.start(this) // 녹음 시작이 끊은 보내기를 다시 잇는다(같은 까닭으로 내려놓기 전에)
