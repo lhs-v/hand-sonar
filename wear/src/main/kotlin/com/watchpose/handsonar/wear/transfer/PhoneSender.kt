@@ -14,6 +14,7 @@ import com.watchpose.handsonar.shared.Offer
 import com.watchpose.handsonar.shared.TransferProtocol
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -28,7 +29,8 @@ sealed interface FileResult {
     /** 녹음이 시작돼(또는 서비스가 멈춰) 끊었다. */
     data object Held : FileResult
 
-    data class Failed(val reason: String) : FileResult
+    /** [permanent]면 다시 보내도 같은 답이 나올 거절이다(폰이 머리말 모양·이름을 거절함, [TransferProtocol.isPermanent]). */
+    data class Failed(val reason: String, val permanent: Boolean = false) : FileResult
 }
 
 /**
@@ -41,6 +43,18 @@ sealed interface FileResult {
 class PhoneSender(context: Context, private val stop: () -> Boolean) : AutoCloseable {
     /** 채널이 닫힌 까닭. [remote]면 폰이 닫았고 [code]가 그 결과 코드다. */
     private data class End(val remote: Boolean, val code: Int)
+
+    /** 쓰기의 끝. */
+    private sealed interface Written {
+        /** [stop]이 참이 되어 그만뒀다. */
+        data object Stopped : Written
+
+        /** 파일 끝까지 쓰고 스트림을 닫았다. */
+        data object Done : Written
+
+        /** 도중에 끊겼다: 이 워치에서 실패했거나(출력을 못 엶·파일을 못 읽음) 폰이 먼저 닫았다(이미 있음·오류). */
+        data class Broken(val bytes: Long, val reason: String) : Written
+    }
 
     private val capabilities = Wearable.getCapabilityClient(context)
     private val messages = Wearable.getMessageClient(context)
@@ -74,7 +88,8 @@ class PhoneSender(context: Context, private val stop: () -> Boolean) : AutoClose
     /**
      * [file]을 채널 하나로 처음부터 끝까지 보내고 폰의 결과 코드를 기다린다. 그사이 [stop]이 참이 되면 채널을 CANCELLED로 닫고 Held.
      * [STALL_MS] 동안 한 바이트도 못 쓰면 STALLED로 닫는다(블루투스가 끊겼는데 쓰기가 막힌 채일 때).
-     * 다 쓴 뒤에는 폰의 결과를 [closeWaitMs]까지 기다린다. [onProgress]는 덩어리마다 지금까지 쓴 바이트다.
+     * 다 쓴 뒤에는 폰의 결과를 [closeWaitMs]까지 기다린다. 도중에 끊겼으면 폰이 먼저 닫은 까닭(이미 있음 등)만 [BROKEN_WAIT_MS] 기다린다:
+     * 이 워치에서 난 실패를 폰의 긴 결과 기다림으로 끌지 않는다. [onProgress]는 덩어리마다 지금까지 쓴 바이트다.
      */
     fun sendFile(phone: String, recording: String, file: File, size: Long, onProgress: (Long) -> Unit): FileResult {
         if (stop()) return FileResult.Held
@@ -101,18 +116,19 @@ class PhoneSender(context: Context, private val stop: () -> Boolean) : AutoClose
         }
         try {
             main.postDelayed(watchdog, WATCHDOG_MS)
-            val stopped = try {
-                write(channel, file, lastWrite, onProgress)
+            val written = try {
+                write(channel, file, size, lastWrite, onProgress)
             } finally {
                 main.removeCallbacks(watchdog)
             }
-            if (stopped) return cancel(channel)
-            val end = endWithin(channel, closeWaitMs(size))
+            if (written == Written.Stopped) return cancel(channel)
+            val end = endWithin(channel, if (written == Written.Done) closeWaitMs(size) else BROKEN_WAIT_MS)
             if (end == null && stop()) return cancel(channel)
             return when {
                 end != null && end.remote && (end.code == TransferProtocol.CODE_OK || end.code == TransferProtocol.CODE_HAVE) -> FileResult.Done
-                end != null && end.remote -> FileResult.Failed("폰: ${TransferProtocol.describe(end.code)}")
+                end != null && end.remote -> FileResult.Failed("폰: ${TransferProtocol.describe(end.code)}", TransferProtocol.isPermanent(end.code))
                 stalled.get() -> FileResult.Failed(TransferProtocol.describe(TransferProtocol.CODE_STALLED))
+                written is Written.Broken -> FileResult.Failed("보내다 끊김(${written.reason})")
                 end != null -> FileResult.Failed("연결이 끊김")
                 else -> FileResult.Failed("폰이 확인하지 않음")
             }
@@ -133,20 +149,17 @@ class PhoneSender(context: Context, private val stop: () -> Boolean) : AutoClose
         channels.unregisterChannelCallback(callback)
     }
 
-    /**
-     * 파일을 출력 스트림에 16 KB씩 쓰고 닫는다. [stop]이 참이 되면 그만두고 true. 폰이 먼저 닫았거나(이미 있음·오류) 연결이 끊겨
-     * 쓰기가 실패해도 false다: 닫힌 까닭은 콜백이 알려 준다.
-     */
-    private fun write(channel: ChannelClient.Channel, file: File, lastWrite: AtomicLong, onProgress: (Long) -> Unit): Boolean {
+    /** 파일을 출력 스트림에 16 KB씩 쓰고 닫는다. 끝까지 썼는지, 그만뒀는지, 몇 바이트에서 왜 끊겼는지를 돌려준다. */
+    private fun write(channel: ChannelClient.Channel, file: File, size: Long, lastWrite: AtomicLong, onProgress: (Long) -> Unit): Written {
         val opening = channels.getOutputStream(channel)
-        if (!succeeded(opening, TIMEOUT_MS)) return stop()
-        return runCatching {
+        if (!succeeded(opening, TIMEOUT_MS)) return if (stop()) Written.Stopped else Written.Broken(0L, "출력을 못 엶(${reason(opening)})")
+        var sent = 0L
+        return try {
             opening.result.use { out ->
                 FileInputStream(file).use { input ->
                     val buffer = ByteArray(CHUNK_BYTES)
-                    var sent = 0L
                     while (true) {
-                        if (stop()) return@runCatching true
+                        if (stop()) return Written.Stopped
                         val n = input.read(buffer)
                         if (n < 0) break
                         out.write(buffer, 0, n)
@@ -156,8 +169,10 @@ class PhoneSender(context: Context, private val stop: () -> Boolean) : AutoClose
                     }
                 }
             }
-            false
-        }.getOrDefault(false)
+            if (sent == size) Written.Done else Written.Broken(sent, "파일 크기가 바뀜")
+        } catch (e: IOException) {
+            Written.Broken(sent, e.message ?: e.javaClass.simpleName)
+        }
     }
 
     /** 보내던 채널을 CANCELLED로 닫는다(녹음 시작). */
@@ -204,6 +219,9 @@ class PhoneSender(context: Context, private val stop: () -> Boolean) : AutoClose
         const val CHUNK_BYTES = 16 * 1024
         const val STALL_MS = 90_000L
         const val WATCHDOG_MS = 10_000L
+
+        /** 쓰기가 도중에 끊긴 뒤 폰이 닫은 까닭을 기다리는 시간. */
+        const val BROKEN_WAIT_MS = 10_000L
 
         /** 다 쓴 뒤 폰의 결과를 기다리는 시간: 120 s + 크기 ÷ 20 KB/s(Play 서비스가 쌓아 둔 것을 천천히 보낼 수 있어서). */
         fun closeWaitMs(size: Long): Long = 120_000L + size / 20
