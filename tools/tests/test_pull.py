@@ -204,6 +204,24 @@ class PullTest(unittest.TestCase):
                 tree(os.path.join(data, "watch", "recordings")),
             )
 
+    def test_sensor_csv_parts_come_along_before_rec_json_and_meta_json(self):
+        # 계획 6의 센서 기록도 이름을 가리지 않고 받는다: 워치 sensors-NNN.csv, 폰 phone_sensors-NNN.csv. 맨 끝 파일(rec.json·meta.json)은
+        # 그 뒤에 받고, 쓰다 남은 .tmp는 받지 않는다.
+        fake = FakeAdb({
+            PHONE: {INBOX_DIR: {"20990101-000000": {"part-000.wav": 300, "sensors-000.csv": 70, "sensors-001.csv": 30, "rec.json": 10}},
+                    PHONE_DIR: {"20990101-000005": {"meta.json": 20, "phone_sensors-000.csv": 40, "landmarks.csv": 50}}},
+            WATCH: {WATCH_DIR: {"20990101-001000": {"part-000.wav": 300, "sensors-000.csv": 70, "sensors-001.csv.tmp": 5, "rec.json": 10}}},
+        })
+        with tempfile.TemporaryDirectory() as data:
+            lines, problems = pull.pull_all(data, "adb", fake)
+            self.assertEqual([], problems, lines)
+            self.assertEqual([
+                "20990101-000000/part-000.wav", "20990101-000000/sensors-000.csv", "20990101-000000/sensors-001.csv", "20990101-000000/rec.json",
+                "20990101-000005/landmarks.csv", "20990101-000005/phone_sensors-000.csv", "20990101-000005/meta.json",
+                "20990101-001000/part-000.wav", "20990101-001000/sensors-000.csv", "20990101-001000/rec.json",
+            ], short(fake.pulled))
+            self.assertNotIn("20990101-001000/sensors-001.csv.tmp", tree(os.path.join(data, "watch", "recordings")))
+
     def test_missing_phone_is_a_problem_but_missing_watch_is_not(self):
         fake = FakeAdb({WATCH: {WATCH_DIR: {"20990101-000000": {"rec.json": 10}}}}, devices_out=WATCH_ONLY_OUT)
         with tempfile.TemporaryDirectory() as data:
