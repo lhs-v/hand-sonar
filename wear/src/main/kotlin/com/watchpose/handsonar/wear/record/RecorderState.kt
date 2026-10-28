@@ -20,6 +20,11 @@ data class RecorderStatus(
     val volumeMax: Int = -1,
     /** 녹음 볼륨으로 바꿨으면 멈출 때 되돌릴 원래 볼륨(계획 6). 바꾸지 않았으면 −1. */
     val volumeRestoreTo: Int = -1,
+    /**
+     * 녹음 볼륨의 알림(계획 6 고침 I1·M3): 외부 출력이라 걸지 않음, 고른 값에 못 맞춤, 녹음 중 출력이 바뀜, 정지 때 되돌리기를 미룸,
+     * 앞 녹음의 볼륨을 나중에 되돌림. 없으면 null. 다음 녹음을 시작할 때 새로 정한다.
+     */
+    val volumeNote: String? = null,
     /** 녹음 폴더 이름(yyyyMMdd-HHmmss). PC로 받을 때 찾는다. */
     val folder: String = "",
     /** 센서 기록의 문제(못 엶·쓰기 실패·기기에 없는 센서, 계획 6). 없으면 null. 센서 기록이 실패해도 녹음은 이어 간다. */

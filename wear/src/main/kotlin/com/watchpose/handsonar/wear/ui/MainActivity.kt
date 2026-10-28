@@ -8,9 +8,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.content.ContextCompat
 import com.watchpose.handsonar.wear.HandSonarApp
-import com.watchpose.handsonar.wear.record.RecordVolumeKeeper
 import com.watchpose.handsonar.wear.record.RecorderService
 import com.watchpose.handsonar.wear.record.RecorderState
+import com.watchpose.handsonar.wear.record.leftoverNote
 import com.watchpose.handsonar.wear.transfer.TransferService
 
 /**
@@ -25,7 +25,8 @@ import com.watchpose.handsonar.wear.transfer.TransferService
  * 화면이 보일 때마다(녹음 중이 아니면) 아직 폰이 확인하지 않은 녹음을 다시 보낸다(전송 설계 §2 "앱이 켜질 때"). 화면이 앞에 있어
  * 포그라운드 서비스 시작 제한에 걸리지 않는다. 원격 시작으로 열렸을 때는 그 바로 뒤의 한 번은 띄우지 않는다: 녹음이 시작되는 순간에
  * 보내기 서비스·데이터 레이어 호출이 겹치지 않게(녹음 서비스가 곧 멈추게 하겠지만 첫 1초의 CPU를 아낀다).
- * 화면이 보일 때 녹음 중이 아니면, 앞 녹음에서 앱이 죽어 되돌리지 못한 녹음 볼륨도 되돌린다(계획 6, [RecordVolumeKeeper]).
+ * 화면이 보일 때 녹음 중이 아니면, 앞 녹음이 남긴 녹음 볼륨 기록(앱이 죽음·외부 출력이라 미룸)도 다룬다(계획 6 고침 I1·M2, shared
+ * `RecordVolumeRules.restoreLeftover`): 스피커로 나가고 그사이 바뀌지 않았으면 되돌리고, 사람이 바꿨으면 그대로 두며, 그 결과를 화면 한 줄에 보인다.
  */
 class MainActivity : ComponentActivity() {
     /** 원격 시작을 막 보냈다: 바로 뒤 onStart에서 보내기를 띄우지 않는다. onResume에서 지워 그 뒤 화면 켜짐은 막지 않는다. */
@@ -41,8 +42,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        // 녹음 중 앱이 죽어 녹음 볼륨이 올라간 채면 되돌린다(바꿔 둔 것이 없으면 할 일 없음)
-        if (!RecorderState.status.value.running) (application as HandSonarApp).volumeKeeper.restore()
+        // 앞 녹음이 남긴 녹음 볼륨 기록을 다룬다(바꿔 둔 것이 없으면 할 일 없음)
+        if (!RecorderState.status.value.running) {
+            leftoverNote((application as HandSonarApp).volumeRules.restoreLeftover())?.let { note -> RecorderState.update { it.copy(volumeNote = note) } }
+        }
         if (skipTransferOnce) {
             skipTransferOnce = false
             return

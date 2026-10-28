@@ -45,8 +45,12 @@ class RecordingLogTest {
         assertTrue(""""stop":{"wallMs":2000,"elapsedNs":9000,"reason":"storage"},""" in json, json)
         assertTrue(""""audio":{"rate":48000,"bits":16,"channels":1,"source":"VOICE_RECOGNITION"},""" in json, json)
         assertTrue(""""tx":{"f0Hz":18000.0,"bandwidthHz":3000.0,"samples":600,"window":"none","amplitude":0.5},""" in json, json)
-        // 녹음 볼륨 "그대로": 고른 값·되돌린 값이 없고 원래 볼륨은 녹음 동안 볼륨과 같다
-        assertTrue(""""volume":{"stream":"music","index":10,"max":15,"choice":null,"original":10,"restored":null,"changes":[]},""" in json, json)
+        // 녹음 볼륨 "그대로": 고른 값·되돌린 값이 없고 원래 볼륨은 녹음 동안 볼륨과 같다. 외부 출력·바뀜·건너뜀·남은 기록도 없다
+        assertTrue(
+            """"volume":{"stream":"music","index":10,"max":15,"choice":null,"original":10,"restored":null,"changes":[],""" +
+                """"target":null,"outputs":[],"outputChanges":[],"skipped":null,"restoreSkipped":null,"leftover":null},""" in json,
+            json,
+        )
         assertTrue(""""recordClockSource":"read","recordClock":[],""" in json, json)
         assertTrue(""""playClock":[[4800,6000]],"underruns":[[7000,2]],"parts":[],"sensors":null}""" in json, json)
     }
@@ -73,11 +77,44 @@ class RecordingLogTest {
             volumeMax = 15,
             volumeChoice = 13,
             volumeOriginal = 7,
+            volumeTarget = 13,
         )
         l.addVolumeChange(6_000L, 12) // 녹음 중 사람이 볼륨을 바꿈
-        assertTrue(""""volume":{"stream":"music","index":13,"max":15,"choice":13,"original":7,"restored":null,"changes":[[6000,12]]},""" in l.toJson(), l.toJson())
-        l.setVolumeRestored(7)
-        assertTrue(""""choice":13,"original":7,"restored":7,"changes":[[6000,12]]},""" in l.toJson(), l.toJson())
+        assertTrue(""""volume":{"stream":"music","index":13,"max":15,"choice":13,"original":7,"restored":null,"changes":[[6000,12]],"target":13,""" in l.toJson(), l.toJson())
+        l.setVolumeRestore(7, null)
+        assertTrue(""""choice":13,"original":7,"restored":7,"changes":[[6000,12]],"target":13,""" in l.toJson(), l.toJson())
+    }
+
+    @Test
+    fun externalOutputsSkippedRestoreAndLeftoverAreRecorded() {
+        // 블루투스 이어폰이 이어진 채 시작(녹음 볼륨을 걸지 않음), 녹음 중 끊겼다 이어짐, 정지 때 이어져 있어 되돌리기를 미룸,
+        // 그 전에 앞 녹음이 남긴 기록은 그사이 바뀌어 지웠음
+        val l = RecordingLog(
+            app = "0.1.0",
+            device = "samsung SM-L320",
+            android = "16 (API 36)",
+            start = ClockPoint(wallMs = 1_000L, elapsedNs = 5_000L),
+            source = "VOICE_RECOGNITION",
+            window = SweepWindow.HANN,
+            amplitude = 0.5f,
+            volumeStream = "music",
+            volumeIndex = 9,
+            volumeMax = 15,
+            volumeChoice = 13,
+            volumeOriginal = 9,
+            volumeOutputs = listOf("bluetooth_a2dp"),
+            volumeSkipped = RecordVolumeRules.SKIP_EXTERNAL,
+            volumeLeftover = VolumeRestore(null, RecordVolumeRules.SKIP_CHANGED, VolumePending(7, 13)),
+        )
+        l.addOutputChange(6_000L, emptyList())
+        l.addOutputChange(7_000L, listOf("bluetooth_a2dp"))
+        l.setVolumeRestore(null, RecordVolumeRules.SKIP_EXTERNAL)
+        assertTrue(
+            """"choice":13,"original":9,"restored":null,"changes":[],"target":null,"outputs":["bluetooth_a2dp"],""" +
+                """"outputChanges":[[6000,[]],[7000,["bluetooth_a2dp"]]],"skipped":"external_output","restoreSkipped":"external_output",""" +
+                """"leftover":{"original":7,"applied":13,"restored":null,"skipped":"changed"}},""" in l.toJson(),
+            l.toJson(),
+        )
     }
 
     @Test
