@@ -145,6 +145,7 @@ class SessionFolderTest(unittest.TestCase):
             np.testing.assert_array_equal([CLASSES[min(n // 60, 3)][0] for n in frame], ds["class_id"])
             np.testing.assert_array_equal(frame % 60 >= 15, ds["labelled"])  # 동작 시작 0.5 s(15프레임)는 경계라 라벨이 아니다
             self.assertEqual([True], ds["rewear"].tolist())
+            self.assertEqual([1], ds["wear"].tolist())  # 다시 찬 세션이라 새 착용(1)이다
             path = os.path.join(data, "dataset.npz")
             dataset.save(path, ds)
             saved = dataset.load(path)
@@ -153,6 +154,19 @@ class SessionFolderTest(unittest.TestCase):
             np.testing.assert_array_equal(ds["x"], dataset.windows(raw, diff, saved["row"]))  # 창은 profiles에서 row로 다시 만든다
             dataset.save(path, ds, with_x=True)
             self.assertIn("x", dataset.load(path))
+
+    def test_rewear_marks_come_from_every_session_folder(self):
+        with tempfile.TemporaryDirectory() as data:
+            for name, meta in (("A", {"status": "trash", "rewear": True, "start": {"wallMs": 500}}),
+                               ("B", {"status": "kept", "rewear": False, "start": {"wallMs": 900}, "end": {"wallMs": 990}}),
+                               ("C", {"status": "kept", "rewear": True, "start": {"wallMs": 1_200}}),  # 끝나지 않은 세션
+                               ("D", {"status": "kept", "rewear": True})):  # 시각이 없으면 경계로 쓸 수 없다
+                folder = os.path.join(data, "phone", "sessions", name)
+                os.makedirs(folder)
+                with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as f:
+                    json.dump(meta, f)
+            os.makedirs(os.path.join(data, "phone", "sessions", "E"))  # meta.json 없음
+            self.assertEqual([500.0, 1_200.0], sorted(dataset.rewear_marks(data)))
 
     def test_pairs_made_with_an_old_lag_are_skipped(self):
         with tempfile.TemporaryDirectory() as data:
@@ -272,12 +286,21 @@ class SessionSplitTest(unittest.TestCase):
             for s in want:
                 self.assertEqual(int((session == s).sum()), int((session[part] == s).sum()))
 
-    def test_rewear_sessions_are_tested_and_the_latest_other_session_validates(self):
+    def test_the_last_wear_is_held_out_whole_and_the_latest_other_session_validates(self):
         t, session = self.frames(5, np.random.default_rng(11))
         wall = np.array([30.0, 10.0, 50.0, 20.0, 40.0])  # 시각 순서 1 · 3 · 0 · 4 · 2(세션 번호 순서가 아님)
-        parts, _, sets = dataset.session_split(t, session, wall, np.array([False, True, False, False, False]))
-        self.assertEqual(([3, 0, 4], [2], [1]), sets)  # 다시 찬 세션 1이 시험, 시험이 아닌 가장 늦은 세션 2가 검증
+        # 세션 4(시각 순 넷째)에서 워치를 다시 찼다: 4와 그 뒤 2가 한 착용이고 통째로 시험이다(2만 학습에 들면 같은 착용 누수)
+        parts, notes, sets = dataset.session_split(t, session, wall, np.array([False, False, False, False, True]))
+        self.assertEqual(([1, 3], [0], [4, 2]), sets)  # 시험이 아닌 가장 늦은 세션 0이 검증
+        self.assertTrue(any("마지막 착용" in line for line in notes), notes)
         self.assertWhole(parts, session, sets)
+        # 다시 찬 첫 세션을 휴지통으로 보냈어도(자료에 없음) 그 시각(35)부터 새 착용이다
+        _, _, sets = dataset.session_split(t, session, wall, np.zeros(5, dtype=bool), wear=dataset.wear_episodes(wall, np.zeros(5, dtype=bool), [35.0]))
+        self.assertEqual(([1, 3], [0], [4, 2]), sets)
+        # 표시가 맨 앞 세션에만 있으면 착용이 하나뿐이다: 시각 순 마지막 세션이 시험(같은 착용 안 — 알림)
+        parts, notes, sets = dataset.session_split(t, session, wall, np.array([False, True, False, False, False]))
+        self.assertEqual(([1, 3, 0], [4], [2]), sets)
+        self.assertTrue(any("착용이 하나뿐" in line for line in notes), notes)
         parts, notes, sets = dataset.session_split(t, session, wall, np.zeros(5, dtype=bool))
         self.assertEqual(([1, 3, 0], [4], [2]), sets)  # 표시가 없으면 가장 늦은 세션이 시험, 그 앞이 검증
         self.assertTrue(any("rewear" in line for line in notes))  # 규칙을 알린다
@@ -285,8 +308,20 @@ class SessionSplitTest(unittest.TestCase):
         t10, s10 = self.frames(10, np.random.default_rng(12))
         _, _, sets = dataset.session_split(t10, s10, np.arange(10.0), np.zeros(10, dtype=bool))
         self.assertEqual(([0, 1, 2, 3, 4, 5, 6], [7], [8, 9]), sets)  # 세션 10개: 마지막 15%(2세션)가 시험
-        _, _, sets = dataset.session_split(t, session, wall, np.zeros(5, dtype=bool), test=[0], val=[3])
+        _, notes, sets = dataset.session_split(t, session, wall, np.zeros(5, dtype=bool), test=[0], val=[3])
         self.assertEqual(([1, 4, 2], [3], [0]), sets)  # 고른 세션을 그대로 쓴다
+        self.assertTrue(any("같은 착용의 세션 4개" in line for line in notes), notes)  # 고른 시험과 같은 착용이 학습·검증에 있음을 알린다
+
+    def test_wear_episodes_start_at_each_rewear_mark_and_hold_out_only_the_last_wear(self):
+        wall = np.arange(10.0)
+        marked = np.zeros(10, dtype=bool)
+        marked[[3, 7]] = True
+        np.testing.assert_array_equal([0, 0, 0, 1, 1, 1, 1, 2, 2, 2], dataset.wear_episodes(wall, marked))
+        np.testing.assert_array_equal([0, 0, 1, 2, 2, 2, 2, 3, 3, 3], dataset.wear_episodes(wall, marked, marks_ms=[1.5]))  # 휴지통의 표시도 경계
+        t, session = self.frames(10, np.random.default_rng(14))
+        parts, _, sets = dataset.session_split(t, session, wall, marked)
+        self.assertEqual(([0, 1, 2, 3, 4, 5], [6], [7, 8, 9]), sets)  # 착용 셋: 마지막 착용(7–9)만 통째로 시험, 앞 착용들은 학습·검증
+        self.assertWhole(parts, session, sets)
 
     def test_two_sessions_validate_on_the_training_tail_and_one_session_stops(self):
         t, session = self.frames(2, np.random.default_rng(13))

@@ -13,9 +13,9 @@
   (100)와 벽시계 상한 --max-minutes(20분, 그 epoch 뒤 멈춤)를 둔다. 학습·검증 손실이 nan·inf면 이유를 적고 끝 코드 1로 멈춘다.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
 - 나누기(--mode, 없으면 세션이 둘 이상이면 session, 하나면 blocks. 규칙은 dataset 머리말):
-  session = dataset.session_split(세션 단위, 설계 §4): 시험 = 워치를 다시 찬 세션(meta rewear), 없으면 시각 순 마지막 세션(들). 검증 =
-    시험이 아닌 가장 늦은 세션(세션이 둘이면 학습 세션의 끝 15%). --test·--val로 세션을 고를 수 있다. "다른 세션·착용에서도 손 모양이
-    나오는가"에 답하는 나누기다. 세션이 하나면 이유를 적고 멈춘다.
+  session = dataset.session_split(세션 단위, 설계 §4): 시험 = 마지막 착용(워치를 다시 찬 뒤, meta rewear)의 세션 통째로, 착용이 하나뿐이면
+    시각 순 마지막 세션(들)(계획 6 검토 고침 M1). 검증 = 시험이 아닌 가장 늦은 세션(세션이 둘이면 학습 세션의 끝 15%). --test·--val로 세션을
+    고를 수 있다. "다른 세션·착용에서도 손 모양이 나오는가"에 답하는 나누기다. 세션이 하나면 이유를 적고 멈춘다.
   blocks = dataset.block_split(10 s 블록을 고정 무늬로 학습·검증·시험에 흩음, 역할이 바뀌는 경계 뒤 2 s 비움. --offset은 무늬를 블록 단위로 돌림).
     세 자료가 세션 전체(손가락·ASL·손목·자유)에 걸친다. 이웃 블록이 맥락을 나누고 원본 채널이 세션 안 시각을 담고 있어 같은 착용 안의
     낙관적 상한으로만 읽는다(세션 단위 나누기를 대신하지 못한다).
@@ -516,7 +516,8 @@ def split_frames(ds, mode, args):
             raise ValueError(f"자료에 없는 세션 {', '.join(missing)}(쓴 세션: {', '.join(names)})")
         return [names.index(g) for g in given]
 
-    parts, notes, sets = dataset.session_split(ds["frame_ns"], ds["session"], ds["wall_ms"], ds["rewear"], test=pick(args.test), val=pick(args.val))
+    parts, notes, sets = dataset.session_split(ds["frame_ns"], ds["session"], ds["wall_ms"], ds["rewear"], test=pick(args.test), val=pick(args.val),
+                                               wear=ds.get("wear"))
     by_name = [[names[s] for s in group] for group in sets]
     lines += ["세션 나누기: " + " · ".join(f"{label} {', '.join(group) or '없음'}" for label, group in zip(ROLE_NAMES, by_name))]
     lines += ["  " + note for note in notes]
