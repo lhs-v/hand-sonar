@@ -5,8 +5,9 @@
 - 기기는 --watch·--phone으로 serial을 주거나, `adb devices -l`의 model로 고른다: SM-L320 = 워치, SM-F971N = 폰
   (adb는 model의 '-'를 '_'로 적는다). 두 기기 모두 무선 adb라 serial과 포트가 켤 때마다 바뀐다.
 - 원격 폴더(워치 files/recordings, 폰 files/sessions) 아래 폴더마다 파일 크기를 `stat -c '%s %n'`으로 보고, PC 사본이 없거나
-  크기가 다른 폴더만 `adb pull`로 같은 자리에 덮어 받는다(설계 §7.3). 받은 뒤 크기를 다시 견줘 다르면 문제로 알린다
-  (무선 adb pull이 끊기면 조각이 잘린다). 녹음 중인 폴더는 크기가 계속 바뀌어 매번 다시 받는다.
+  크기가 다른 폴더만 `adb pull`로 같은 자리에 덮어 받는다(설계 §7.3). 받은 뒤 원격 크기를 다시 재서 PC 사본과 견준다.
+  받는 동안 크기가 바뀐(또는 새로 생긴) 파일은 녹음 중인 폴더라 문제로 세지 않고 "녹음 중이라 다음에 다시 받음"으로 알린다.
+  원격 크기가 그대로인데 PC 사본이 다르면 받기 실패다(무선 adb pull이 끊기면 조각이 잘린다).
 - adb 실행은 run(args) -> (끝 코드, 출력)으로 주입한다. 시험은 가짜 실행기를 쓰고 실제 기기를 쓰지 않는다.
 문제가 하나라도 있으면 끝 코드 1로 끝난다.
 """
@@ -86,11 +87,18 @@ def pull_device(run, adb, serial, kind, data):
     wanted = [name for name in sorted(sizes) if differs(sizes[name], local_sizes(os.path.join(parent, name)))]
     lines = [f"{label}({serial}): 폴더 {len(sizes)}개, 새로 받을 것 {len(wanted)}개" + (f": {', '.join(wanted)}" if wanted else "")]
     problems = []
+    results = {name: run([adb, "-s", serial, "pull", f"{remote}/{name}", parent]) for name in wanted}
+    after = remote_sizes(run, adb, serial, remote) if wanted else {}  # 받은 뒤 다시 잰 원격 크기
     for name in wanted:
-        code, out = run([adb, "-s", serial, "pull", f"{remote}/{name}", parent])
-        bad = differs(sizes[name], local_sizes(os.path.join(parent, name)))
-        if code != 0 or bad:
-            problems.append(f"{label} {name}: 받기 실패(끝 코드 {code}, 크기가 다른 파일 {', '.join(bad) or '없음'}) {out.strip()[-200:]}")
+        code, out = results[name]
+        now = after.get(name, sizes[name])
+        bad = differs(now, local_sizes(os.path.join(parent, name)))
+        growing = [n for n in bad if sizes[name].get(n) != now.get(n)]  # 받는 동안 크기가 바뀐 파일(녹음 중)
+        broken = [n for n in bad if n not in growing]
+        if code != 0 or broken:
+            problems.append(f"{label} {name}: 받기 실패(끝 코드 {code}, 크기가 다른 파일 {', '.join(broken) or '없음'}) {out.strip()[-200:]}")
+        elif growing:
+            lines.append(f"{label} {name}: 녹음 중이라 다음에 다시 받음(받는 동안 크기가 바뀐 파일 {', '.join(growing)})")
     return lines, problems
 
 

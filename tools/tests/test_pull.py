@@ -67,6 +67,32 @@ class PullTest(unittest.TestCase):
                               ("10.0.0.5:40001", phone_dir + "/20990101-000005")], fake.pulled)
             self.assertEqual(500, os.path.getsize(os.path.join(data, "phone", "sessions", "20990101-000005", "video.mp4")))
 
+    def test_recording_in_progress_is_not_a_failure_but_a_cut_pull_is(self):
+        # 녹음 중인 폴더는 받는 동안 조각이 커져 받은 사본이 받은 뒤 원격 크기와 다르다: 실패가 아니라 "녹음 중"으로 알린다.
+        # 원격 크기가 그대로인데 사본이 짧으면(무선 pull이 끊김) 받기 실패다.
+        watch_dir = pull.APP + "/recordings"
+        remote = {watch_dir: {"20990101-000000": {"rec.json": 10, "part-000.wav": 300}, "20990101-001000": {"rec.json": 12, "part-000.wav": 400}}}
+
+        class Growing(FakeAdb):
+            def __call__(self, args):
+                folder = args[4].rsplit("/", 1)[1] if args[3:4] == ["pull"] else None
+                if folder == "20990101-000000":
+                    remote[watch_dir][folder]["part-000.wav"] += 4_800  # stat 뒤 pull 전에도 녹음이 이어진다
+                code, out = super().__call__(args)
+                if folder == "20990101-000000":
+                    remote[watch_dir][folder]["part-000.wav"] += 4_800  # 받은 뒤에도 이어진다
+                elif folder:
+                    with open(os.path.join(args[5], folder, "part-000.wav"), "wb") as f:
+                        f.write(b"\0" * 100)  # 끊겨 잘린 사본
+                return code, out
+
+        fake = Growing({"adb-AAAA._adb-tls-connect._tcp": remote})
+        with tempfile.TemporaryDirectory() as data:
+            lines, problems = pull.pull_all(data, "adb", fake, only="watch")
+            self.assertEqual(1, len(problems), problems)
+            self.assertIn("20990101-001000", problems[0])
+            self.assertTrue(any("20990101-000000" in line and "녹음 중" in line for line in lines), lines)
+
 
 if __name__ == "__main__":
     unittest.main()
