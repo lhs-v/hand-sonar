@@ -77,8 +77,9 @@ private fun granted(context: Context, permission: String): Boolean =
     ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
 /**
- * 워치의 유일한 화면(설계 §5.1): 시작·정지, 녹음 시간, 남은 녹음, 볼륨, 재생 끊김, 처프 창·세기, 자동 정지(녹음 중에는 남은 시간).
- * 창·세기·자동 정지는 녹음하지 않을 때만 바꾼다. 녹음하지 않을 때는 폰으로 보내기 상태 한 줄이 있다(전송 설계 §2).
+ * 워치의 유일한 화면(설계 §5.1): 시작·정지, 녹음 시간, 남은 녹음, 볼륨, 재생 끊김, 처프 창·세기, 녹음 볼륨, 자동 정지(녹음 중에는 남은 시간).
+ * 창·세기·녹음 볼륨·자동 정지는 녹음하지 않을 때만 바꾼다. 녹음하지 않을 때는 폰으로 보내기 상태 한 줄이 있다(전송 설계 §2).
+ * 녹음 볼륨(전송 설계 §8, 계획 6)을 고르면 녹음 동안 미디어 볼륨을 그 단계로 맞추고 끝나면 되돌린다.
  */
 @Composable
 fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> Unit) {
@@ -104,7 +105,7 @@ fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> U
                     label = { Text(if (status.running) "정지" else "녹음 시작") },
                 )
             }
-            item { Details(status, idle, transfer) }
+            item { Details(status, idle, transfer, values.recordVolume) }
             if (!status.running) {
                 item {
                     FilledTonalButton(
@@ -120,6 +121,16 @@ fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> U
                         modifier = Modifier.fillMaxWidth(),
                         secondaryLabel = { Text("누르면 10%씩, 100% 다음은 10%") },
                         label = { Text("세기 ${(values.amplitude * 100).roundToInt()}%") },
+                    )
+                }
+                item {
+                    FilledTonalButton(
+                        onClick = settings::cycleRecordVolume,
+                        modifier = Modifier.fillMaxWidth(),
+                        secondaryLabel = {
+                            Text(if (values.recordVolume == 0) "미디어 볼륨 그대로" else "녹음 동안 ${values.recordVolume}, 끝나면 되돌림")
+                        },
+                        label = { Text("녹음 볼륨") },
                     )
                 }
                 item {
@@ -153,8 +164,9 @@ private fun rememberIdleInfo(): IdleInfo {
     return info
 }
 
+/** [recordVolume]은 고른 녹음 볼륨(0 = 그대로)이다. 골랐으면 녹음 전의 볼륨 0은 시작 때 올라가므로 경고하지 않는다. */
 @Composable
-private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus) {
+private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus, recordVolume: Int) {
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
     val small = MaterialTheme.typography.bodySmall
     val minutesLeft = if (s.running) s.minutesLeft else idle.minutesLeft
@@ -174,15 +186,20 @@ private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus)
             )
         }
         if (volumeMax > 0) {
-            val silent = volumeIndex == 0 // 볼륨 0이면 처프가 안 나가 그 녹음을 못 쓴다: 녹음 전에도 중에도 오류 색으로 알린다
+            // 볼륨 0이면 처프가 안 나가 그 녹음을 못 쓴다: 녹음 전에도 중에도 오류 색으로 알린다(녹음 볼륨을 골랐으면 녹음 전에는 알리지 않는다)
+            val silent = volumeIndex == 0 && (s.running || recordVolume == 0)
+            val restore = if (s.running && s.volumeRestoreTo >= 0) " · 끝나면 원래 ${s.volumeRestoreTo}" else ""
             Text(
-                if (silent) "미디어 볼륨 0/$volumeMax · 처프가 안 나감" else "미디어 볼륨 $volumeIndex/$volumeMax",
+                if (silent) "미디어 볼륨 0/$volumeMax · 처프가 안 나감" else "미디어 볼륨 $volumeIndex/$volumeMax$restore",
                 style = small,
                 color = if (silent) MaterialTheme.colorScheme.error else dim,
                 textAlign = TextAlign.Center,
             )
         }
+        // 녹음 볼륨을 걸지 못했거나(외부 출력·못 맞춤) 출력이 바뀌었거나 되돌리기를 미룸(계획 6 고침 I1·M3)
+        s.volumeNote?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
         if (s.folder.isNotEmpty()) Text("폴더 ${s.folder}", style = small, color = dim, textAlign = TextAlign.Center)
+        if (s.running) s.sensorNote?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) } // 센서 문제(녹음은 이어 감), 녹음 중에만
         if (!s.running) transferLine(transfer)?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) }
         s.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
     }

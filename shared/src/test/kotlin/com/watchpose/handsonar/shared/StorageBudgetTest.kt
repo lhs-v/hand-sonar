@@ -5,15 +5,21 @@ import kotlin.test.assertEquals
 
 class StorageBudgetTest {
     @Test
+    fun oneSecondIsSoundPlusSensors() {
+        assertEquals(96_000 + 32_000, StorageBudget.BYTES_PER_SECOND)
+    }
+
+    @Test
     fun minutesFromFreeBytes() {
-        assertEquals(10.0, StorageBudget.minutesLeft(96_000L * 600), 1e-9)
+        assertEquals(10.0, StorageBudget.minutesLeft(128_000L * 600), 1e-9)
     }
 
     @Test
     fun warnsBelowTenMinutesAndStopsBelowOne() {
-        assertEquals(StorageBudget.Level.OK, StorageBudget.level(96_000L * 60 * 10))
-        assertEquals(StorageBudget.Level.WARN, StorageBudget.level(96_000L * 60 * 10 - 1))
-        assertEquals(StorageBudget.Level.WARN, StorageBudget.level(96_000L * 60))
-        assertEquals(StorageBudget.Level.STOP, StorageBudget.level(96_000L * 60 - 1))
+        val minute = StorageBudget.BYTES_PER_SECOND * 60L
+        assertEquals(StorageBudget.Level.OK, StorageBudget.level(minute * 10))
+        assertEquals(StorageBudget.Level.WARN, StorageBudget.level(minute * 10 - 1))
+        assertEquals(StorageBudget.Level.WARN, StorageBudget.level(minute))
+        assertEquals(StorageBudget.Level.STOP, StorageBudget.level(minute - 1))
     }
 }

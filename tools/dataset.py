@@ -18,10 +18,14 @@
 - 동작 라벨(평가용, 학습 목표 아님): pairs.csv prompt·classId·flag·edge. 라벨로 쓸 줄 = prompt ≥ 0, edge 0, 일시정지 아님,
   flag ≠ wrong(pairs.py와 같은 규칙). 자유 동작(−1)은 라벨이 있는 줄로 친다.
 - 나누기(설계 §4). 셋 다 (학습, 검증, 시험) 프레임 번호를 세션·시각 순서로 낸다.
-  - session_split(세션 단위): 시험 = meta.json rewear가 참인 세션(워치를 다시 찬 세션). 그런 세션이 없거나 모든 세션이면 시각
-    (meta start wallMs) 순으로 마지막 max(1, round(0.15 × 세션 수))세션. 검증 = 시험이 아닌 세션 중 가장 늦은 하나. 시험이 아닌 세션이
-    하나뿐이면(세션 둘) 검증 세션을 따로 둘 수 없어 학습 세션의 끝 15%(앞 2 s 비움)를 검증으로 쓴다. 학습 = 나머지. 시험·검증 세션을
-    직접 고를 수도 있다. 세션이 하나면 나누지 못한다(ValueError). 지금 폰 앱은 rewear를 늘 false로 적는다(다시 차기 안내가 아직 없음).
+  - session_split(세션 단위): 착용 묶음 통째로 나눈다(계획 6 검토 고침 M1). 착용(wear_episodes): 시각(meta start wallMs) 순으로 meta.json
+    rewear가 참인 세션에서 새 착용이 시작해 다음 그런 세션 전까지 간다. 경계에는 자료에 들지 않은 세션(휴지통·끝나지 않음·처리 안 됨)의
+    표시도 쓴다(rewear_marks — 다시 찬 첫 세션을 버렸어도 그 뒤는 새 착용). 시험 = 자료의 착용이 둘 이상이면 시각 순 마지막 착용의 세션 전부
+    (같은 착용의 뒤 세션이 학습에 들지 않게). 착용이 하나뿐이면(표시가 없거나 맨 앞 세션에만) 시각 순 마지막 max(1, round(0.15 × 세션 수))세션
+    (같은 착용 안이라 낙관적 — 알림). 검증 = 시험이 아닌 세션 중 가장 늦은 하나. 시험이 아닌 세션이 하나뿐이면(세션 둘) 검증 세션을 따로 둘 수
+    없어 학습 세션의 끝 15%(앞 2 s 비움)를 검증으로 쓴다. 학습 = 나머지. 시험·검증 세션을 직접 고를 수도 있다(시험과 같은 착용이 학습·검증에
+    남으면 알림). 세션이 하나면 나누지 못한다(ValueError). rewear는 폰 준비 화면의 "워치 다시 참"이 적는다(계획 6, 다시 찬 뒤 처음 보관된
+    세션에 참). 그 전 세션은 늘 false다.
   - block_split(세션 안, 실험용): 세션 시간표를 10 s 블록으로 자르고 블록 번호 mod 20(+offset)으로 학습 14 · 검증 3 · 시험 3자리를 고정
     무늬로 흩어 놓는다(세 자료가 세션 전체에 걸침). 역할이 바뀌는 모든 경계 뒤 2 s를 비운다(시험 → 학습 경계도). 같은 착용 안의
     낙관적 상한이다: 원본 채널이 세션 안 시각을 담고 있어 학습 블록 사이에 낀 시험 블록은 표류를 보간할 수 있다.
@@ -30,7 +34,8 @@
 dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), sessions·hands (S,) 문자열,
-length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
+length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wear (S,) int64(착용 번호, wear_episodes — 옛 dataset.npz에는 없고 그때는
+rewear로 만든다), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
 label_names (K,) 문자열, input_files (3,) 문자열(verify_sync.INPUTS)과 inputs (S, 3) 문자열(그 세션 sync.json의 입력 SHA-256 지문).
 창 x (N, 2, 96, 60) float32는 기본으로 쓰지 않는다(프레임당 46 KB, 세션당 약 170 MB). 창은 지문이 같은 processed 폴더의
 profiles.npy·diff_profiles.npy에서 row로 다시 만든다(windows). save(…, with_x=True)(명령의 --save-x)일 때만 x도 쓴다.
@@ -260,7 +265,35 @@ def build(data, names=()):
         lines += more
         if part is not None:
             parts.append(part)
-    return (merge(parts) if parts else None), lines
+    if not parts:
+        return None, lines
+    ds = merge(parts)
+    ds["wear"] = wear_episodes(ds["wall_ms"], ds["rewear"], rewear_marks(data))
+    return ds, lines
+
+
+def rewear_marks(data):
+    """phone/sessions의 모든 세션(휴지통·끝나지 않은 세션 포함) 중 meta.json rewear가 참인 것의 시작 wallMs들. 읽지 못하는 meta와 시각이 없는
+    세션은 건너뛴다(착용 경계로 쓸 수 없다)."""
+    marks = []
+    for name in hs_io.session_names(data):
+        try:
+            meta = hs_io.read_json(os.path.join(hs_io.session_folder(data, name), "meta.json"))
+        except (OSError, ValueError):
+            continue
+        wall = hs_io.num(meta.get("start"), "wallMs")
+        if meta.get("rewear") and wall is not None:
+            marks.append(wall)
+    return marks
+
+
+def wear_episodes(wall_ms, rewear, marks_ms=()):
+    """세션마다 착용 번호(머리말 session_split, 계획 6 검토 고침 M1): 시각 순으로 rewear가 참인 세션에서 새 착용이 시작해 다음 그런 세션 전까지
+    간다. marks_ms는 자료에 들지 않은 세션까지 포함한 rewear 참 세션의 시작 wallMs들이다(rewear_marks). 첫 표시 전 세션은 0. (S,) int64."""
+    wall = np.asarray(wall_ms, dtype=np.float64)
+    marked = np.asarray(rewear, dtype=bool)
+    starts = np.array(sorted({float(m) for m in marks_ms} | {float(w) for w in wall[marked]}), dtype=np.float64)
+    return np.searchsorted(starts, wall, side="right").astype(np.int64)
 
 
 def time_split(t_ns, session, fractions=SPLIT, gap_sec=GAP_SEC):
@@ -317,10 +350,11 @@ def block_split(t_ns, session, block_sec=BLOCK_SEC, offset=0, gap_sec=GAP_SEC):
     return tuple(order[keep[order] & (role[order] == r)].astype(np.int64) for r in range(3))
 
 
-def session_split(t_ns, session, wall_ms, rewear, test=None, val=None, fractions=SPLIT, gap_sec=GAP_SEC):
+def session_split(t_ns, session, wall_ms, rewear, test=None, val=None, fractions=SPLIT, gap_sec=GAP_SEC, wear=None):
     """세션 단위 나누기(머리말): ((학습, 검증, 시험) 프레임 번호, 알릴 줄, (학습, 검증, 시험) 세션 번호 목록(각각 시각 순서)).
-    wall_ms·rewear (S,)는 세션마다 시작 시각과 다시 찬 표시다. test·val(세션 번호 목록)을 주면 그대로 쓰고, 주지 않은 쪽은 규칙을 따른다.
-    검증 세션이 빈 목록이면 학습 세션마다 끝 fractions[1]을 검증으로 쓴다(앞 gap_sec 비움). 나눌 수 없으면 ValueError(이유)."""
+    wall_ms·rewear (S,)는 세션마다 시작 시각과 다시 찬 표시, wear (S,)는 착용 번호(dataset.npz wear — 없으면 rewear로 이 자료 안에서만 만든다:
+    휴지통 세션의 표시는 모른다). test·val(세션 번호 목록)을 주면 그대로 쓰고, 주지 않은 쪽은 규칙을 따른다. 검증 세션이 빈 목록이면 학습
+    세션마다 끝 fractions[1]을 검증으로 쓴다(앞 gap_sec 비움). 나눌 수 없으면 ValueError(이유)."""
     t_ns = np.asarray(t_ns, dtype=np.int64)
     session = np.asarray(session)
     count = len(wall_ms)
@@ -328,18 +362,20 @@ def session_split(t_ns, session, wall_ms, rewear, test=None, val=None, fractions
         raise ValueError(f"세션이 {count}개뿐이라 세션 단위로 나눌 수 없음 — 세션을 더 모으거나 --mode blocks(같은 착용 안 낙관적 상한)로")
     order = [int(s) for s in np.argsort(np.asarray(wall_ms, dtype=np.float64), kind="stable")]  # 시각 순서
     fixed_val = [int(s) for s in (val or [])]
+    wear = wear_episodes(wall_ms, rewear) if wear is None else np.asarray(wear, dtype=np.int64)
     notes = []
     if test is None:
         pool = [s for s in order if s not in fixed_val]
-        marked = [s for s in pool if rewear[s]]
-        if marked and len(marked) < len(pool):
-            test = marked
-            notes.append(f"시험 = 워치를 다시 찬 세션(meta rewear) {len(marked)}개")
+        episodes = sorted({int(wear[s]) for s in pool})
+        if len(episodes) >= 2:
+            test = [s for s in pool if int(wear[s]) == episodes[-1]]
+            notes.append(f"시험 = 마지막 착용(워치를 다시 찬 뒤, meta rewear)의 세션 {len(test)}개 통째로(자료의 착용 {len(episodes)}개 중)"
+                         " — 같은 착용의 세션은 학습·검증에 들지 않는다")
         else:
             k = max(1, int(round(fractions[2] * count)))
             test = pool[-k:]
-            notes.append(("모든 세션에 다시 찬 표시(meta rewear)가 있어" if marked else "다시 찬 표시(meta rewear)가 있는 세션이 없어")
-                         + f" 시각 순 마지막 {k}세션(세션 수의 {fractions[2]:.0%}, 적어도 하나)을 시험으로")
+            notes.append(f"착용이 하나뿐이라(사이에 다시 찬 표시 meta rewear가 없음) 시각 순 마지막 {k}세션(세션 수의 {fractions[2]:.0%}, 적어도 하나)을"
+                         " 시험으로 — 같은 착용 안이라 낙관적이다")
     test = [s for s in order if s in [int(v) for v in test]]
     if set(test) & set(fixed_val):
         raise ValueError("같은 세션을 시험과 검증에 함께 둘 수 없음")
@@ -348,6 +384,10 @@ def session_split(t_ns, session, wall_ms, rewear, test=None, val=None, fractions
     train = [s for s in order if s not in test and s not in val]
     if not train:
         raise ValueError("학습에 남는 세션이 없음")
+    held = {int(wear[s]) for s in test}
+    leaked = [s for s in train + val if int(wear[s]) in held]
+    if leaked:
+        notes.append(f"시험과 같은 착용의 세션 {len(leaked)}개가 학습·검증에 있음(고른 세션 때문 — 같은 착용 누수라 시험이 낙관적이다)")
 
     def frames(sets):
         idx = np.flatnonzero(np.isin(session, sets))
@@ -393,7 +433,7 @@ def main():
         print("쓸 세션이 없음")
         return 1
     if len(ds["sessions"]) >= 2:  # train.py의 기본 나누기
-        (train, val, test), notes, _ = session_split(ds["frame_ns"], ds["session"], ds["wall_ms"], ds["rewear"])
+        (train, val, test), notes, _ = session_split(ds["frame_ns"], ds["session"], ds["wall_ms"], ds["rewear"], wear=ds.get("wear"))
         how = "세션 나누기(" + "; ".join(notes) + ")"
     else:
         train, val, test = block_split(ds["frame_ns"], ds["session"])

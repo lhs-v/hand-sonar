@@ -11,12 +11,20 @@
 - 폰 세션 폴더(설계 §7.2·§8.1): meta.json, phone_audio.wav·json, prompts.csv, landmarks.csv.
   휴지통·되살리기로 다시 쓴 meta.json은 org.json 모양이라 1.0이 1로 바뀌므로 숫자는 float()로 받고, 키가 없으면 기본값을 쓴다.
   쓸 세션은 status가 kept이고 end·stats가 있는 것뿐이다(chosen).
+- 센서 기록(계획 6): 워치 녹음 폴더의 sensors-NNN.csv, 폰 세션 폴더의 phone_sensors-NNN.csv(read_sensors). 열은
+  t_ns,recv_ns,sensor,x,y,z,accuracy이고 t_ns는 이벤트 시각, recv_ns는 앱이 받은 때의 elapsedNs다. 조각은 번호 순으로 잇고, 열이 7개가
+  아니거나 숫자가 아닌 줄(앱이 죽어 잘린 마지막 줄)은 버린다. 이벤트 시각이 elapsedNs 기준인지는 기기(폴더)마다 연속 센서의 (받은 시각 − 이벤트
+  시각) 바닥(1% 값)으로 본다(SensorLog.event_clock, 검토 고침 M4): 전달 지연은 0 이상이고 맞는 시계라면 바닥은 0 근처다 — 배치·스레드 지연은
+  중앙값을 키울 뿐 바닥을 옮기지 않고, 시계 어긋남은 바닥을 옮긴다. 바뀔 때만 내는 light는 첫 줄이 오래된 값일 수 있어 판정에서 뺀다. 아니면
+  이벤트 시각 + 바닥을 근사로 쓴다(SensorLog.ns — 이벤트 사이 간격은 그대로). 파일이 없으면 이 기능 전 녹음·세션이다(None). meta.json의 세션
+  정보·rewear는 session_context, rec.json의 녹음 볼륨(외부 출력·되돌리기 미룸 포함)은 recording_volume으로 읽는다(없는 칸은 기본값).
 python -I에서도 사용자 설치 numpy를 찾게 경로를 붙인다(다른 도구는 numpy보다 먼저 이 모듈을 부른다).
 """
 import csv
 import hashlib
 import json
 import os
+import re
 import site
 import sys
 from dataclasses import dataclass
@@ -293,6 +301,140 @@ def read_landmarks(folder):
         last, last_ns = wrist, frame_ns[i]
     return Landmarks(np.array(frame_ns, dtype=np.int64), hands, tracked, points[:, 0], points[:, 1], valid, dropped,
                      np.array(scores, dtype=np.float64))
+
+
+SENSOR_COLUMNS = ["t_ns", "recv_ns", "sensor", "x", "y", "z", "accuracy"]  # 센서 CSV 머리줄(계획 6, shared SensorCsv.HEADER)
+WATCH_SENSORS = "sensors"  # 워치 녹음 폴더의 sensors-NNN.csv(acc·gyro·mag·grav, 약 100 Hz)
+PHONE_SENSORS = "phone_sensors"  # 폰 세션 폴더의 phone_sensors-NNN.csv(acc·gyro 약 100 Hz, light는 바뀔 때만)
+CONTINUOUS = ("acc", "gyro", "mag", "grav")  # 연속 센서: 시계 판정에 쓴다(light는 바뀔 때만 내고 첫 줄이 오래된 값일 수 있다)
+EVENT_LAG_FLOOR_MIN_NS = -5e6  # 연속 센서 (받은 시각 − 이벤트 시각)의 1% 값이 이 값 이상이고
+EVENT_LAG_FLOOR_MAX_NS = 50e6  # 이 값 이하면 이벤트 시각을 그 기기의 elapsedNs로 믿는다(기기 확인 작업 9-1의 실측으로 문턱을 다시 본다)
+
+
+@dataclass
+class SensorTrack:
+    """센서 한 종류(acc·gyro·mag·grav·light)의 줄들. 파일 차례 그대로다. 맞춤에 쓸 시각은 SensorLog.ns(kind)다(시계 판정이 기기 단위라)."""
+    kind: str
+    t_ns: np.ndarray  # (n,) int64 SensorEvent.timestamp
+    recv_ns: np.ndarray  # (n,) int64 앱이 이벤트를 받은 때의 SystemClock.elapsedRealtimeNanos
+    values: np.ndarray  # (n, 3) float64. light는 x(lux)만이고 y·z는 nan
+    accuracy: np.ndarray  # (n,) int64 SensorEvent.accuracy(−1 접촉 없음, 0 믿을 수 없음, 1–3)
+
+    @property
+    def lag_ns(self):
+        """받은 시각 − 이벤트 시각(ns)."""
+        return self.recv_ns - self.t_ns
+
+    def rate_hz(self):
+        """(줄 수 − 1) ÷ 첫·마지막 이벤트 시각 간격. 줄이 2개 미만이거나 간격이 0 이하면 nan."""
+        if len(self.t_ns) < 2:
+            return float("nan")
+        span = float(self.t_ns[-1] - self.t_ns[0])
+        return (len(self.t_ns) - 1) / span * 1e9 if span > 0 else float("nan")
+
+
+@dataclass
+class SensorLog:
+    """한 폴더(기기 하나)의 센서 CSV 조각들을 이은 것."""
+    files: list  # 읽은 조각 경로(번호 순)
+    tracks: dict  # {종류: SensorTrack}, 처음 나온 차례
+    dropped: int  # 열이 7개가 아니거나 숫자가 아니라(끝이 잘림) 버린 줄 수
+
+    @property
+    def lag_floor_ns(self):
+        """연속 센서(CONTINUOUS)를 모두 모은 (받은 시각 − 이벤트 시각)의 1% 값(ns). 연속 센서 줄이 없으면 None."""
+        lags = [t.lag_ns for k, t in self.tracks.items() if k in CONTINUOUS and len(t.t_ns)]
+        return float(np.percentile(np.concatenate(lags), 1)) if lags else None
+
+    @property
+    def event_clock(self):
+        """이벤트 시각이 그 기기의 elapsedNs 기준인가: 연속 센서 지연의 1% 값이 EVENT_LAG_FLOOR_MIN_NS..MAX_NS. 연속 센서가 없으면 판정하지 않고
+        True(밝기만 있으면 이벤트 시각 그대로)."""
+        floor = self.lag_floor_ns
+        return floor is None or EVENT_LAG_FLOOR_MIN_NS <= floor <= EVENT_LAG_FLOOR_MAX_NS
+
+    def ns(self, kind):
+        """kind의 맞춤용 elapsedNs(int64): event_clock이면 이벤트 시각, 아니면 이벤트 시각 + 지연 1% 값(이벤트 사이 간격은 그대로 두고 시계만
+        옮긴 근사 — 받은 시각을 그대로 쓰면 전달 지연의 흔들림이 간격에 들어간다)."""
+        t = self.tracks[kind].t_ns
+        return t if self.event_clock else t + int(round(self.lag_floor_ns))
+
+
+def sensor_files(folder, base=WATCH_SENSORS):
+    """folder의 <base>-NNN.csv(NNN은 숫자 셋 이상)를 번호 순으로. 폴더가 없거나 파일이 없으면 []. 쓰다 남은 .tmp 등 다른 이름은 뺀다."""
+    pattern = re.compile(re.escape(base) + r"-(\d{3,})\.csv")
+    if not os.path.isdir(folder):
+        return []
+    found = [(int(m.group(1)), os.path.join(folder, name)) for name in os.listdir(folder) if (m := pattern.fullmatch(name))]
+    return [path for _, path in sorted(found)]
+
+
+def read_sensors(folder, base=WATCH_SENSORS):
+    """센서 CSV(계획 6)를 읽어 SensorLog로. 파일이 없으면 None(이 기능 전의 녹음·세션이거나 센서 기록을 끈 녹음 — 문제가 아니다).
+    머리줄이 다른 파일은 ValueError(형식이 바뀜). 빈 파일(머리줄도 내보내기 전에 앱이 죽음)은 건너뛴다."""
+    files = sensor_files(folder, base)
+    if not files:
+        return None
+    columns = {}
+    dropped = 0
+    for path in files:
+        with open(path, encoding="utf-8", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None:
+                continue
+            if header != SENSOR_COLUMNS:
+                raise ValueError(f"{os.path.basename(path)}: 머리줄이 다름 {header}")
+            for row in reader:
+                try:
+                    if len(row) != len(SENSOR_COLUMNS) or not row[2]:
+                        raise ValueError
+                    t, r = int(row[0]), int(row[1])
+                    v = [float(s) if s else np.nan for s in row[3:6]]
+                    a = int(row[6])
+                except ValueError:
+                    dropped += 1
+                    continue
+                c = columns.setdefault(row[2], ([], [], [], []))
+                c[0].append(t)
+                c[1].append(r)
+                c[2].append(v)
+                c[3].append(a)
+    tracks = {kind: SensorTrack(kind, np.array(t, dtype=np.int64), np.array(r, dtype=np.int64),
+                                np.array(v, dtype=np.float64).reshape(-1, 3), np.array(a, dtype=np.int64))
+              for kind, (t, r, v, a) in columns.items()}
+    return SensorLog(files, tracks, dropped)
+
+
+def session_context(meta):
+    """폰 세션 정보(계획 6): {"place", "posture", "armSupport", "strap", "rewear"}. 고르지 않은 칸과 이 기능 전 세션은 None, rewear는 False.
+    posture는 sitting | standing, armSupport는 desk | air, strap은 loose | normal | tight다."""
+    ctx = meta.get("context") or {}
+    return {"place": ctx.get("place") or None, "posture": ctx.get("posture"), "armSupport": ctx.get("armSupport"),
+            "strap": ctx.get("strap"), "rewear": bool(meta.get("rewear"))}
+
+
+def recording_volume(rec):
+    """워치 녹음 볼륨(계획 6, 검토 고침 I1): {"index": 녹음 동안 미디어 볼륨, "max", "choice": 고른 단계(None = 그대로), "target": 맞추려던 값
+    (그대로·걸지 않음이면 None), "original": 녹음 전 볼륨, "restored": 멈춘 뒤 되돌린 값(None = 되돌리지 않음), "restoreSkipped": 되돌리지 않은 까닭,
+    "skipped": 걸지 않은 까닭("external_output"), "outputs": 시작 때 외부 출력, "outputChanges": [[elapsedNs, [출력…]], …], "changes":
+    [[elapsedNs, 볼륨], …](녹음 중 바뀐 때), "leftover": 앞 녹음이 남긴 기록을 다룬 결과({"original", "applied", "restored", "skipped"}) 또는 None}.
+    볼륨 값은 그때 미디어가 나가는 기기의 것이다(outputs·outputChanges가 있으면 그 기기). 이 기능 전 녹음은 choice·target·restored·skipped·
+    restoreSkipped·leftover가 None, original이 index, 목록은 []다."""
+    v = rec.get("volume") or {}
+
+    def whole(key, d=v):
+        return None if d.get(key) is None else int(d[key])
+
+    index = whole("index")
+    original = whole("original")
+    left = v.get("leftover")
+    return {"index": index, "max": whole("max"), "choice": whole("choice"), "original": index if original is None else original,
+            "restored": whole("restored"), "changes": [[int(t), int(i)] for t, i in v.get("changes") or []], "target": whole("target"),
+            "restoreSkipped": v.get("restoreSkipped"), "skipped": v.get("skipped"), "outputs": list(v.get("outputs") or []),
+            "outputChanges": [[int(t), list(o)] for t, o in v.get("outputChanges") or []],
+            "leftover": None if not left else {"original": whole("original", left), "applied": whole("applied", left),
+                                               "restored": whole("restored", left), "skipped": left.get("skipped")}}
 
 
 def chosen(data, names=()):
