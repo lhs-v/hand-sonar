@@ -96,20 +96,29 @@ class SensorReadTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 hs_io.read_sensors(d)
 
-    def test_event_time_is_used_only_when_receive_time_is_close(self):
-        t = T0 + np.arange(100, dtype=np.int64) * 10_000_000
-        z, a = np.zeros((100, 3)), np.full(100, 3)
-        near = hs_io.SensorTrack("acc", t, t + 3_000_000, z, a)  # 받은 시각이 3 ms 뒤
-        self.assertTrue(near.event_clock)
-        self.assertIs(near.t_ns, near.ns)
-        self.assertAlmostEqual(100.0, near.rate_hz(), places=9)
-        early = hs_io.SensorTrack("acc", t + 50_000_000, t, z, a)  # 이벤트 시각이 50 ms 앞섬: 맞춤 오차 권장(100 ms) 안
-        self.assertTrue(early.event_clock)
-        other = hs_io.SensorTrack("acc", t - 3_600_000_000_000, t + 3_000_000, z, a)  # 다른 시계(한 시간 차이)
-        self.assertFalse(other.event_clock)
-        self.assertIs(other.recv_ns, other.ns)  # 받은 시각을 근사로 쓴다
+    def test_event_clock_is_judged_per_device_from_the_floor_of_continuous_sensor_lags(self):
+        t = T0 + np.arange(200, dtype=np.int64) * 10_000_000
+        z, a = np.zeros((200, 3)), np.full(200, 3)
+        lag = np.full(200, 3_000_000, dtype=np.int64)
+        lag[::10] = 300_000_000  # 가끔 300 ms 늦게 받음(배치·스레드 지연): 중앙값이 아니라 바닥(1%)을 보므로 그대로 믿는다
+        stale = np.array([40_000_000_000, 1_000_000, 1_000_000])  # 밝기 첫 줄은 들을 때 받은 오래된 값(40 s 전 시각)
+        light = hs_io.SensorTrack("light", t[:3], t[:3] + stale, z[:3], a[:3])
+        log = hs_io.SensorLog([], {"acc": hs_io.SensorTrack("acc", t, t + lag, z, a), "light": light}, 0)
+        self.assertAlmostEqual(3e6, log.lag_floor_ns)
+        self.assertTrue(log.event_clock)  # 밝기(바뀔 때만)는 판정에서 뺀다
+        self.assertIs(log.tracks["acc"].t_ns, log.ns("acc"))
+        self.assertAlmostEqual(100.0, log.tracks["acc"].rate_hz(), places=9)
+        # 다른 시계: 이벤트 시각이 늘 300 ms 앞섬(바닥 301 ms) → 이벤트 시각 + 바닥(이벤트 사이 간격은 그대로)
+        skewed = hs_io.SensorLog([], {"gyro": hs_io.SensorTrack("gyro", t - 300_000_000, t + 1_000_000, z, a)}, 0)
+        self.assertFalse(skewed.event_clock)
+        np.testing.assert_array_equal(t + 1_000_000, skewed.ns("gyro"))
+        ahead = hs_io.SensorLog([], {"acc": hs_io.SensorTrack("acc", t + 20_000_000, t, z, a)}, 0)  # 이벤트 시각이 받은 시각보다 20 ms 뒤(미래)
+        self.assertFalse(ahead.event_clock)
+        np.testing.assert_array_equal(t, ahead.ns("acc"))
+        only_light = hs_io.SensorLog([], {"light": light}, 0)
+        self.assertIsNone(only_light.lag_floor_ns)
+        self.assertTrue(only_light.event_clock)  # 연속 센서가 없으면 판정하지 않고 이벤트 시각 그대로
         empty = hs_io.SensorTrack("acc", t[:0], t[:0], z[:0], a[:0])
-        self.assertFalse(empty.event_clock)
         self.assertTrue(np.isnan(empty.rate_hz()))
 
 
@@ -120,11 +129,17 @@ class MetaFieldsTest(unittest.TestCase):
         self.assertEqual({"place": "집 책상", "posture": "sitting", "armSupport": "air", "strap": "tight", "rewear": True}, hs_io.session_context(meta))
 
     def test_recording_volume_with_defaults_for_older_recordings(self):
+        empty = {"target": None, "restoreSkipped": None, "skipped": None, "outputs": [], "outputChanges": [], "leftover": None}
         old = hs_io.recording_volume({"volume": {"stream": "music", "index": 11, "max": 15}})
-        self.assertEqual({"index": 11, "max": 15, "choice": None, "original": 11, "restored": None, "changes": []}, old)
-        rec = {"volume": {"stream": "music", "index": 13, "max": 15, "choice": 13, "original": 7, "restored": 7, "changes": [[5, 12]]}}
-        self.assertEqual({"index": 13, "max": 15, "choice": 13, "original": 7, "restored": 7, "changes": [[5, 12]]}, hs_io.recording_volume(rec))
-        self.assertEqual({"index": None, "max": None, "choice": None, "original": None, "restored": None, "changes": []}, hs_io.recording_volume({}))
+        self.assertEqual({"index": 11, "max": 15, "choice": None, "original": 11, "restored": None, "changes": [], **empty}, old)
+        rec = {"volume": {"stream": "music", "index": 13, "max": 15, "choice": 13, "original": 7, "restored": 7, "changes": [[5, 12]],
+                          "target": 13, "outputs": [], "outputChanges": [[6, ["bluetooth_a2dp"]]], "skipped": None, "restoreSkipped": "external_output",
+                          "leftover": {"original": 4, "applied": 15, "restored": None, "skipped": "changed"}}}
+        self.assertEqual({"index": 13, "max": 15, "choice": 13, "original": 7, "restored": 7, "changes": [[5, 12]], "target": 13,
+                          "restoreSkipped": "external_output", "skipped": None, "outputs": [], "outputChanges": [[6, ["bluetooth_a2dp"]]],
+                          "leftover": {"original": 4, "applied": 15, "restored": None, "skipped": "changed"}}, hs_io.recording_volume(rec))
+        self.assertEqual({"index": None, "max": None, "choice": None, "original": None, "restored": None, "changes": [], **empty},
+                         hs_io.recording_volume({}))
 
 
 if __name__ == "__main__":

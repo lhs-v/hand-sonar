@@ -78,7 +78,7 @@ handsonar.keyPassword=android
 파이썬 3.13과 numpy·scipy·matplotlib을 씁니다. 기기에서 받은 파일은 `python -I`로만 읽습니다. 데이터는 저장소 옆 `../hand-sonar-data`에 받고(다른 곳이면 `--data`), 세션마다 결과를 `../hand-sonar-data/processed/<세션>/`에 씁니다. 세션 이름을 주지 않으면 보관된(`kept`) 끝난 세션을 모두 처리합니다.
 
 1. `python -I tools/pull.py` — 폰의 세션과 폰이 받은 워치 녹음, 워치 녹음을 adb로 받습니다. 폰을 먼저 받고(USB라 빠름), 워치에서는 폰에 없거나 크기가 다른 파일만 받습니다. 워치가 없어도 됩니다. 파일마다 받고, `rec.json`·`meta.json`은 그 폴더의 다른 파일을 다 받은 뒤에 받습니다(조각이 빠진 사본이 처리에 들어가지 않게). 기기는 모델(워치 SM-L320, 폰 SM-F971N)로 찾고, `--watch`·`--phone`으로 serial을 줄 수 있습니다. adb를 쓸 수 없는 PC는 폰의 "내보내기" zip을 `hand-sonar-data`에 풉니다.
-   - 점검: `python -I tools/check_recording.py <녹음 폴더>`(조각·녹음 시각·재생 끊김), `python -I tools/check_sensors.py <녹음 또는 세션 폴더>`(센서의 실제 표본률·받은 시각 − 이벤트 시각·빈틈, 녹음 볼륨, 세션 정보). 센서 CSV는 `hs_io.read_sensors`로 읽습니다.
+   - 점검: `python -I tools/check_recording.py <녹음 폴더>`(조각·녹음 시각·재생 끊김), `python -I tools/check_sensors.py <녹음 또는 세션 폴더>`(센서의 실제 표본률·받은 시각 − 이벤트 시각·빈틈과 시계 판정, 녹음 볼륨과 외부 출력·되돌리기, 세션 정보). 센서 CSV는 `hs_io.read_sensors`로 읽고, 맞춤에 쓸 시각은 `SensorLog.ns(종류)`입니다: 기기마다 연속 센서의 받은 시각 − 이벤트 시각 1% 값이 −5–50 ms면 이벤트 시각을 그대로, 아니면 그만큼 옮겨 씁니다(바뀔 때만 내는 밝기는 판정에서 뺍니다).
 2. `python -I tools/align.py` — 폰 표지음으로 워치 샘플 번호와 폰 시각을 맞춥니다(`align.json`).
 3. `python -I tools/profiles.py` — 공개 데이터(WatchHand)와 같은 처리로 에코 프로파일을 만듭니다(`profiles.npy`, `diff_profiles.npy`, `rows.npz`).
 4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`). 지연이 1프레임(33 ms) 밖이거나 상관 봉우리가 문턱(0.1) 아래면 맞춤을 확인하지 못한 세션으로 적고 끝 코드 1로 끝납니다.

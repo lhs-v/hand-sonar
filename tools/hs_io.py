@@ -13,9 +13,11 @@
   쓸 세션은 status가 kept이고 end·stats가 있는 것뿐이다(chosen).
 - 센서 기록(계획 6): 워치 녹음 폴더의 sensors-NNN.csv, 폰 세션 폴더의 phone_sensors-NNN.csv(read_sensors). 열은
   t_ns,recv_ns,sensor,x,y,z,accuracy이고 t_ns는 이벤트 시각, recv_ns는 앱이 받은 때의 elapsedNs다. 조각은 번호 순으로 잇고, 열이 7개가
-  아니거나 숫자가 아닌 줄(앱이 죽어 잘린 마지막 줄)은 버린다. 이벤트 시각이 elapsedNs 기준인지는 받은 시각과 견줘 보고(SensorTrack.event_clock),
-  아니면 받은 시각을 근사로 쓴다(SensorTrack.ns). 파일이 없으면 이 기능 전 녹음·세션이다(None). meta.json의 세션 정보·rewear는
-  session_context, rec.json의 녹음 볼륨은 recording_volume으로 읽는다(없는 칸은 기본값).
+  아니거나 숫자가 아닌 줄(앱이 죽어 잘린 마지막 줄)은 버린다. 이벤트 시각이 elapsedNs 기준인지는 기기(폴더)마다 연속 센서의 (받은 시각 − 이벤트
+  시각) 바닥(1% 값)으로 본다(SensorLog.event_clock, 검토 고침 M4): 전달 지연은 0 이상이고 맞는 시계라면 바닥은 0 근처다 — 배치·스레드 지연은
+  중앙값을 키울 뿐 바닥을 옮기지 않고, 시계 어긋남은 바닥을 옮긴다. 바뀔 때만 내는 light는 첫 줄이 오래된 값일 수 있어 판정에서 뺀다. 아니면
+  이벤트 시각 + 바닥을 근사로 쓴다(SensorLog.ns — 이벤트 사이 간격은 그대로). 파일이 없으면 이 기능 전 녹음·세션이다(None). meta.json의 세션
+  정보·rewear는 session_context, rec.json의 녹음 볼륨(외부 출력·되돌리기 미룸 포함)은 recording_volume으로 읽는다(없는 칸은 기본값).
 python -I에서도 사용자 설치 numpy를 찾게 경로를 붙인다(다른 도구는 numpy보다 먼저 이 모듈을 부른다).
 """
 import csv
@@ -304,13 +306,14 @@ def read_landmarks(folder):
 SENSOR_COLUMNS = ["t_ns", "recv_ns", "sensor", "x", "y", "z", "accuracy"]  # 센서 CSV 머리줄(계획 6, shared SensorCsv.HEADER)
 WATCH_SENSORS = "sensors"  # 워치 녹음 폴더의 sensors-NNN.csv(acc·gyro·mag·grav, 약 100 Hz)
 PHONE_SENSORS = "phone_sensors"  # 폰 세션 폴더의 phone_sensors-NNN.csv(acc·gyro 약 100 Hz, light는 바뀔 때만)
-EVENT_LAG_MIN_NS = -0.1e9  # 받은 시각 − 이벤트 시각의 중앙값이 이 값 이상이고(CDD 7.3의 맞춤 오차 권장 100 ms)
-EVENT_LAG_MAX_NS = 0.5e9  # 이 값 이하면 이벤트 시각을 elapsedNs로 믿는다. 배치 없이 받으므로 보통 수 ms다(넘으면 다른 시계로 본다)
+CONTINUOUS = ("acc", "gyro", "mag", "grav")  # 연속 센서: 시계 판정에 쓴다(light는 바뀔 때만 내고 첫 줄이 오래된 값일 수 있다)
+EVENT_LAG_FLOOR_MIN_NS = -5e6  # 연속 센서 (받은 시각 − 이벤트 시각)의 1% 값이 이 값 이상이고
+EVENT_LAG_FLOOR_MAX_NS = 50e6  # 이 값 이하면 이벤트 시각을 그 기기의 elapsedNs로 믿는다(기기 확인 작업 9-1의 실측으로 문턱을 다시 본다)
 
 
 @dataclass
 class SensorTrack:
-    """센서 한 종류(acc·gyro·mag·grav·light)의 줄들. 파일 차례 그대로다. 시각은 그 기기의 elapsedNs여야 한다(event_clock으로 본다)."""
+    """센서 한 종류(acc·gyro·mag·grav·light)의 줄들. 파일 차례 그대로다. 맞춤에 쓸 시각은 SensorLog.ns(kind)다(시계 판정이 기기 단위라)."""
     kind: str
     t_ns: np.ndarray  # (n,) int64 SensorEvent.timestamp
     recv_ns: np.ndarray  # (n,) int64 앱이 이벤트를 받은 때의 SystemClock.elapsedRealtimeNanos
@@ -322,19 +325,6 @@ class SensorTrack:
         """받은 시각 − 이벤트 시각(ns)."""
         return self.recv_ns - self.t_ns
 
-    @property
-    def event_clock(self):
-        """이벤트 시각이 elapsedNs 기준으로 보이는가: 받은 시각과의 차 중앙값이 EVENT_LAG_MIN_NS..EVENT_LAG_MAX_NS. 줄이 없으면 False."""
-        if len(self.t_ns) == 0:
-            return False
-        lag = float(np.median(self.lag_ns))
-        return EVENT_LAG_MIN_NS <= lag <= EVENT_LAG_MAX_NS
-
-    @property
-    def ns(self):
-        """맞춤에 쓸 elapsedNs: event_clock이면 이벤트 시각, 아니면 받은 시각(근사 — 받을 때까지의 지연만큼 늦다)."""
-        return self.t_ns if self.event_clock else self.recv_ns
-
     def rate_hz(self):
         """(줄 수 − 1) ÷ 첫·마지막 이벤트 시각 간격. 줄이 2개 미만이거나 간격이 0 이하면 nan."""
         if len(self.t_ns) < 2:
@@ -345,10 +335,29 @@ class SensorTrack:
 
 @dataclass
 class SensorLog:
-    """한 폴더의 센서 CSV 조각들을 이은 것."""
+    """한 폴더(기기 하나)의 센서 CSV 조각들을 이은 것."""
     files: list  # 읽은 조각 경로(번호 순)
     tracks: dict  # {종류: SensorTrack}, 처음 나온 차례
     dropped: int  # 열이 7개가 아니거나 숫자가 아니라(끝이 잘림) 버린 줄 수
+
+    @property
+    def lag_floor_ns(self):
+        """연속 센서(CONTINUOUS)를 모두 모은 (받은 시각 − 이벤트 시각)의 1% 값(ns). 연속 센서 줄이 없으면 None."""
+        lags = [t.lag_ns for k, t in self.tracks.items() if k in CONTINUOUS and len(t.t_ns)]
+        return float(np.percentile(np.concatenate(lags), 1)) if lags else None
+
+    @property
+    def event_clock(self):
+        """이벤트 시각이 그 기기의 elapsedNs 기준인가: 연속 센서 지연의 1% 값이 EVENT_LAG_FLOOR_MIN_NS..MAX_NS. 연속 센서가 없으면 판정하지 않고
+        True(밝기만 있으면 이벤트 시각 그대로)."""
+        floor = self.lag_floor_ns
+        return floor is None or EVENT_LAG_FLOOR_MIN_NS <= floor <= EVENT_LAG_FLOOR_MAX_NS
+
+    def ns(self, kind):
+        """kind의 맞춤용 elapsedNs(int64): event_clock이면 이벤트 시각, 아니면 이벤트 시각 + 지연 1% 값(이벤트 사이 간격은 그대로 두고 시계만
+        옮긴 근사 — 받은 시각을 그대로 쓰면 전달 지연의 흔들림이 간격에 들어간다)."""
+        t = self.tracks[kind].t_ns
+        return t if self.event_clock else t + int(round(self.lag_floor_ns))
 
 
 def sensor_files(folder, base=WATCH_SENSORS):
@@ -406,18 +415,26 @@ def session_context(meta):
 
 
 def recording_volume(rec):
-    """워치 녹음 볼륨(계획 6): {"index": 녹음 동안 미디어 볼륨, "max", "choice": 고른 단계(None = 그대로), "original": 녹음 전 볼륨,
-    "restored": 멈춘 뒤 되돌린 값(None = 바꾸지 않음), "changes": [[elapsedNs, 볼륨], …](녹음 중 바뀐 때)}.
-    이 기능 전 녹음은 choice·restored가 None, original이 index, changes가 []다."""
+    """워치 녹음 볼륨(계획 6, 검토 고침 I1): {"index": 녹음 동안 미디어 볼륨, "max", "choice": 고른 단계(None = 그대로), "target": 맞추려던 값
+    (그대로·걸지 않음이면 None), "original": 녹음 전 볼륨, "restored": 멈춘 뒤 되돌린 값(None = 되돌리지 않음), "restoreSkipped": 되돌리지 않은 까닭,
+    "skipped": 걸지 않은 까닭("external_output"), "outputs": 시작 때 외부 출력, "outputChanges": [[elapsedNs, [출력…]], …], "changes":
+    [[elapsedNs, 볼륨], …](녹음 중 바뀐 때), "leftover": 앞 녹음이 남긴 기록을 다룬 결과({"original", "applied", "restored", "skipped"}) 또는 None}.
+    볼륨 값은 그때 미디어가 나가는 기기의 것이다(outputs·outputChanges가 있으면 그 기기). 이 기능 전 녹음은 choice·target·restored·skipped·
+    restoreSkipped·leftover가 None, original이 index, 목록은 []다."""
     v = rec.get("volume") or {}
 
-    def whole(key):
-        return None if v.get(key) is None else int(v[key])
+    def whole(key, d=v):
+        return None if d.get(key) is None else int(d[key])
 
     index = whole("index")
     original = whole("original")
+    left = v.get("leftover")
     return {"index": index, "max": whole("max"), "choice": whole("choice"), "original": index if original is None else original,
-            "restored": whole("restored"), "changes": [[int(t), int(i)] for t, i in v.get("changes") or []]}
+            "restored": whole("restored"), "changes": [[int(t), int(i)] for t, i in v.get("changes") or []], "target": whole("target"),
+            "restoreSkipped": v.get("restoreSkipped"), "skipped": v.get("skipped"), "outputs": list(v.get("outputs") or []),
+            "outputChanges": [[int(t), list(o)] for t, o in v.get("outputChanges") or []],
+            "leftover": None if not left else {"original": whole("original", left), "applied": whole("applied", left),
+                                               "restored": whole("restored", left), "skipped": left.get("skipped")}}
 
 
 def chosen(data, names=()):

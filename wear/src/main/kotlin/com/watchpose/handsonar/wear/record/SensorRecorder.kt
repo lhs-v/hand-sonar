@@ -21,7 +21,8 @@ import java.io.File
  * 배치 없이(최대 지연 0) 듣고, 이벤트마다 이벤트 시각(SensorEvent.timestamp)과 받은 시각(SystemClock.elapsedRealtimeNanos)을
  * [SensorCsvWriter]에 넘긴다. 줄 쓰기·1분 조각·1초마다 내보내기·정해진 버퍼는 그쪽이 맡는다.
  * 이벤트 시각의 기준: SDK 문서와 CDD 7.3은 elapsedRealtimeNanos와 같은 시계를 요구하지만 맞춤 오차는 100 ms 아래를 권할 뿐이고, 이 기기에서
- * 아직 재지 않았다. 그래서 받은 시각을 줄마다 함께 적는다(PC `hs_io.SensorTrack.event_clock`이 견주고, 어긋나면 받은 시각을 쓴다).
+ * 아직 재지 않았다. 그래서 받은 시각을 줄마다 함께 적는다(PC `hs_io.SensorLog.event_clock`이 기기마다 연속 센서 지연의 바닥으로 견주고, 어긋나면
+ * 이벤트 시각을 그 바닥만큼 옮겨 쓴다).
  * 소리 녹음을 방해하지 않게: 시작·정지는 예외를 내지 않고 문제를 [report]·[note]에 남기며, 기기에 없는 센서는 건너뛴다.
  * [start]·[stop]은 주 스레드에서 한 번씩 부른다. 폰 앱 `mobile.session.SensorRecorder`와 같은 틀이다(두 앱이 함께 쓰는 안드로이드 모듈은 없다).
  */
