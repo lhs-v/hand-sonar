@@ -40,4 +40,5 @@ dependencies {
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.wear.ongoing)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.play.services.wearable) // 녹음을 폰으로 보내기(전송 설계 §2)
 }

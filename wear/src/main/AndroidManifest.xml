@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -36,5 +37,11 @@
             android:name=".record.RecorderService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- 녹음을 폰으로 보내기(전송 설계 §2). 안드로이드 14부터 종류(dataSync)와 그 권한이 있어야 하고, 15부터 하루 6시간 제한(onTimeout)이 있다. -->
+        <service
+            android:name=".transfer.TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

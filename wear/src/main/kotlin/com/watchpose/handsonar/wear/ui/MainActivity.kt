@@ -10,6 +10,7 @@ import androidx.core.content.ContextCompat
 import com.watchpose.handsonar.wear.HandSonarApp
 import com.watchpose.handsonar.wear.record.RecorderService
 import com.watchpose.handsonar.wear.record.RecorderState
+import com.watchpose.handsonar.wear.transfer.TransferService
 
 /**
  * 워치의 유일한 화면을 연다. 컨트롤러(PC)가 adb로 녹음을 원격 시작할 수 있다(설계 §5.1):
@@ -19,6 +20,8 @@ import com.watchpose.handsonar.wear.record.RecorderState
  * 대신 원격 시작은 권한 창을 띄우지 않으므로(사람이 눌러야 한다) 마이크 권한이 이미 허용돼 있어야 한다.
  * 허용돼 있지 않으면 시작하지 않고 화면에 이유를 보인다.
  * `autoStopMinutes`는 이번 녹음만 설정의 자동 정지를 대신한다(0 = 끔). 생략하면 설정을 따른다.
+ * 화면이 보일 때마다(녹음 중이 아니면) 아직 폰이 확인하지 않은 녹음을 다시 보낸다(전송 설계 §2 "앱이 켜질 때"). 화면이 앞에 있어
+ * 포그라운드 서비스 시작 제한에 걸리지 않는다.
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,6 +30,11 @@ class MainActivity : ComponentActivity() {
         setContent { RecorderApp(app) }
         // 화면이 다시 만들어질 때(회전·프로세스 복원)는 처음 인텐트가 남아 있어도 다시 시작하지 않는다
         if (savedInstanceState == null) remoteStart(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!RecorderState.status.value.running) TransferService.start(this)
     }
 
     override fun onNewIntent(intent: Intent) {
