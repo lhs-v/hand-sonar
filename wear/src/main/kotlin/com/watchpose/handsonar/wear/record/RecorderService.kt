@@ -20,6 +20,7 @@ import androidx.wear.ongoing.Status
 import com.watchpose.handsonar.shared.ClockPoint
 import com.watchpose.handsonar.shared.PartWriter
 import com.watchpose.handsonar.shared.RecordingLog
+import com.watchpose.handsonar.shared.SensorPlan
 import com.watchpose.handsonar.shared.StopReason
 import com.watchpose.handsonar.shared.StorageBudget
 import com.watchpose.handsonar.shared.Sweep
@@ -49,12 +50,16 @@ import java.util.Locale
  * 미디어 볼륨이 0이면 시작하지 않는다(설계 §5.4): 처프가 나가지 않아 녹음 전체가 쓸모없고, 워치 미디어 볼륨은 adb로 바꿀 수 없어 다시 일어나기 쉽다.
  * 폰으로 보내기(전송 설계 §2): 시작할 때 맨 먼저 보내기를 멈추게 하고(녹음 중에는 보내지 않는다), 멈출 때(이유와 상관없이)와
  * 시작하다 실패할 때 포그라운드를 내려놓기 전에 [TransferService]를 띄운다.
+ * 센서 기록(전송 설계 §8, 계획 6): 녹음·재생을 다 연 뒤에 [SensorRecorder]를 시작하고(소리 녹음을 방해하지 않게), 멈출 때 정지 시각을 잰 뒤
+ * 마지막 rec.json과 보내기 전에 닫는다(보내기는 다 닫힌 파일만 옮긴다). 센서 기록이 실패해도 녹음은 이어 간다.
+ * 원격 시작에 `sensors` false를 주면 그 녹음만 센서를 듣지 않는다(센서 기록이 소리에 주는 영향을 견줄 때).
  */
 class RecorderService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var recorder: SonarRecorder? = null
     @Volatile private var player: SonarPlayer? = null
     @Volatile private var writer: PartWriter? = null
+    @Volatile private var sensors: SensorRecorder? = null
     @Volatile private var log: RecordingLog? = null
     @Volatile private var folder: File? = null
     @Volatile private var finished = false
@@ -70,7 +75,7 @@ class RecorderService : LifecycleService() {
         if (intent?.action == ACTION_STOP) {
             finish(StopReason.USER, null)
         } else if (!RecorderState.status.value.running) {
-            begin(intent?.getIntExtra(EXTRA_AUTO_STOP_MINUTES, -1)?.takeIf { it >= 0 })
+            begin(intent?.getIntExtra(EXTRA_AUTO_STOP_MINUTES, -1)?.takeIf { it >= 0 }, intent?.getBooleanExtra(EXTRA_SENSORS, true) ?: true)
         }
         return START_NOT_STICKY
     }
@@ -80,10 +85,14 @@ class RecorderService : LifecycleService() {
         super.onDestroy()
     }
 
-    /** [autoStopOverride]는 이번 녹음만 설정 대신 쓰는 자동 정지 분이다(원격 시작이 넘긴다). null이면 설정을 따른다. */
-    private fun begin(autoStopOverride: Int?) {
+    /**
+     * [autoStopOverride]는 이번 녹음만 설정 대신 쓰는 자동 정지 분이다(원격 시작이 넘긴다). null이면 설정을 따른다.
+     * [withSensors]가 false면 이번 녹음은 센서를 듣지 않는다(원격 시작 `sensors` false).
+     */
+    private fun begin(autoStopOverride: Int?, withSensors: Boolean) {
         TransferService.holdForRecording() // 녹음 중에는 보내지 않는다(전송 설계 §2): 보내던 파일을 바로 끊게 한다
         finished = false
+        sensors = null // 멈춘 직후 다시 시작하면 서비스 객체가 그대로 쓰인다: 앞 녹음의 센서 보고가 새 rec.json에 들지 않게
         try {
             startInForeground() // startForegroundService 뒤 몇 초 안에 해야 하므로 맨 먼저 한다
         } catch (e: Exception) {
@@ -141,6 +150,8 @@ class RecorderService : LifecycleService() {
             finish(StopReason.ERROR, it)
             return
         }
+        // 센서는 소리가 다 열린 뒤에 듣는다(소리 녹음을 방해하지 않게). 못 열어도 녹음은 이어 가고 rec.json·화면에 남긴다.
+        if (withSensors) sensors = SensorRecorder(this, dir, SensorPlan.WATCH_BASE, SensorPlan.WATCH).also { it.start() }
         writeLog()
         val autoStopMinutes = autoStopOverride ?: settings.autoStopMinutes
         autoStopAtMs = if (autoStopMinutes > 0) startedAt.elapsedNs / 1_000_000 + autoStopMinutes * 60_000L else 0L
@@ -154,6 +165,7 @@ class RecorderService : LifecycleService() {
                 volumeIndex = am.getStreamVolume(AudioManager.STREAM_MUSIC),
                 volumeMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
                 folder = dir.name,
+                sensorNote = sensors?.note(),
             )
         }
         haptics.start()
@@ -195,6 +207,7 @@ class RecorderService : LifecycleService() {
                     storageWarning = level == StorageBudget.Level.WARN,
                     volumeIndex = am.getStreamVolume(AudioManager.STREAM_MUSIC),
                     volumeMax = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+                    sensorNote = sensors?.note(),
                 )
             }
             ticks++
@@ -219,6 +232,7 @@ class RecorderService : LifecycleService() {
         val dir = folder ?: return
         val l = log ?: return
         writer?.let { l.setParts(it.parts) }
+        sensors?.let { l.setSensors(it.report()) }
         val json = l.toJson()
         val tmp = File(dir, "rec.json.tmp")
         tmp.writeText(json)
@@ -236,7 +250,9 @@ class RecorderService : LifecycleService() {
         recorder?.stop()
         player?.stop()
         writer?.close()
-        log?.finish(ClockPoint(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos()), reason, writer?.parts.orEmpty())
+        val stoppedAt = ClockPoint(System.currentTimeMillis(), SystemClock.elapsedRealtimeNanos()) // 소리가 멈춘 때(센서를 닫기 전)
+        sensors?.stop() // 마지막 rec.json과 보내기 전에 CSV를 닫는다
+        log?.finish(stoppedAt, reason, writer?.parts.orEmpty())
         writeLog()
         // 진동은 포그라운드를 내려놓기 전에 낸다: 내려놓은 뒤의 백그라운드 진동은 무시될 수 있다(화면이 꺼진 자동 정지 끝).
         if (error == null) haptics.stop() else haptics.error()
@@ -250,6 +266,7 @@ class RecorderService : LifecycleService() {
         finished = true
         recorder?.stop()
         writer?.close()
+        sensors?.stop() // 센서는 재생까지 연 뒤에 시작하므로 보통 없다
         folder?.let { dir -> if (dir.listFiles().isNullOrEmpty()) dir.delete() }
         haptics.error() // finish()와 같은 이유로 포그라운드를 내려놓기 전에 낸다
         TransferService.start(this) // 녹음 시작이 끊은 보내기를 다시 잇는다(같은 까닭으로 내려놓기 전에)
@@ -293,6 +310,9 @@ class RecorderService : LifecycleService() {
 
         /** 시작 인텐트에 넣는 자동 정지 분(Int, 0 = 끔). 있으면 이번 녹음만 설정 대신 쓴다. 원격 시작(adb)이 넘긴다. */
         const val EXTRA_AUTO_STOP_MINUTES = "autoStopMinutes"
+
+        /** 시작 인텐트의 센서 기록 여부(Boolean, 없으면 켬). false면 이번 녹음만 센서를 듣지 않는다. 원격 시작(adb)이 넘긴다. */
+        const val EXTRA_SENSORS = "sensors"
         private const val CHANNEL_ID = "recording"
         private const val NOTIFICATION_ID = 1
         private const val TICK_MS = 1_000L
@@ -300,10 +320,14 @@ class RecorderService : LifecycleService() {
         private const val WAKE_LOCK_TIMEOUT_MS = 4 * 60 * 60 * 1000L
         private val STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
 
-        /** [autoStopMinutes]가 null이면 설정의 자동 정지를 따르고, 값이 있으면(0 = 끔) 이번 녹음만 그 값을 쓴다. */
-        fun start(context: Context, autoStopMinutes: Int? = null): Boolean = try {
+        /**
+         * [autoStopMinutes]가 null이면 설정의 자동 정지를 따르고, 값이 있으면(0 = 끔) 이번 녹음만 그 값을 쓴다.
+         * [sensors]가 false면 이번 녹음만 센서를 듣지 않는다.
+         */
+        fun start(context: Context, autoStopMinutes: Int? = null, sensors: Boolean = true): Boolean = try {
             val intent = Intent(context, RecorderService::class.java)
             if (autoStopMinutes != null) intent.putExtra(EXTRA_AUTO_STOP_MINUTES, autoStopMinutes)
+            if (!sensors) intent.putExtra(EXTRA_SENSORS, false)
             ContextCompat.startForegroundService(context, intent)
             true
         } catch (e: Exception) {

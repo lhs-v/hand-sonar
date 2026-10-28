@@ -183,6 +183,7 @@ private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus)
             )
         }
         if (s.folder.isNotEmpty()) Text("폴더 ${s.folder}", style = small, color = dim, textAlign = TextAlign.Center)
+        s.sensorNote?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) } // 센서 문제(녹음은 이어 감)
         if (!s.running) transferLine(transfer)?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) }
         s.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
     }
