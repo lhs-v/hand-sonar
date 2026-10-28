@@ -25,12 +25,14 @@ private val PERMISSIONS = arrayOf(Manifest.permission.CAMERA, Manifest.permissio
 
 /**
  * 권한을 받고 장치를 연 뒤 지금 화면을 그린다. [activity]는 카메라를 이을 수명 주인이자 화면 정보(가장 짧은 변, 회전)다.
- * 워치에서 받은 녹음 상태(전송 설계 §3)는 앱 객체의 받기 상태를 그대로 준비·기록 화면에 넘긴다.
+ * 워치에서 받은 녹음 상태(전송 설계 §3)는 앱 객체의 받기 상태를 그대로 준비·기록 화면에 넘기고, 내보내기(§5)는 기록 화면에 넘긴다.
  */
 @Composable
 fun App(controller: SessionController, activity: ComponentActivity) {
     val ui by controller.ui.collectAsStateWithLifecycle()
-    val inbox by (activity.application as HandSonarPhoneApp).inbox.status.collectAsStateWithLifecycle()
+    val app = activity.application as HandSonarPhoneApp
+    val inbox by app.inbox.status.collectAsStateWithLifecycle()
+    val export by app.exporter.status.collectAsStateWithLifecycle()
     fun open() = controller.openDevices(
         activity,
         activity.resources.configuration.smallestScreenWidthDp,
@@ -50,7 +52,7 @@ fun App(controller: SessionController, activity: ComponentActivity) {
                 Screen.READY -> ReadyScreen(ui, controller, inbox, onRequestPermission = { launcher.launch(PERMISSIONS) })
                 Screen.COLLECT -> CollectScreen(ui, controller)
                 Screen.SUMMARY -> SummaryScreen(ui, controller)
-                Screen.RECORDS -> RecordsScreen(ui, controller, inbox)
+                Screen.RECORDS -> RecordsScreen(ui, controller, inbox, export, app.exporter::start)
             }
         }
     }
