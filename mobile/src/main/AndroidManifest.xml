@@ -32,5 +32,25 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 워치 녹음 받기(전송 설계 §2). 데이터 레이어가 앱이 꺼져 있어도 이 서비스를 깨운다. 경로로 이 앱의 목록 요청·채널만 받는다. -->
+        <service
+            android:name=".transfer.WatchReceiverService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.REQUEST_RECEIVED" />
+                <data
+                    android:host="*"
+                    android:path="/hand-sonar/offer"
+                    android:scheme="wear" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.CHANNEL_EVENT" />
+                <data
+                    android:host="*"
+                    android:pathPrefix="/hand-sonar/rec/"
+                    android:scheme="wear" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

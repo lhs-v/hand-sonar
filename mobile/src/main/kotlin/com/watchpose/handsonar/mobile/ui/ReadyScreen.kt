@@ -26,16 +26,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.watchpose.handsonar.mobile.session.SessionController
 import com.watchpose.handsonar.mobile.session.UiState
+import com.watchpose.handsonar.mobile.transfer.InboxStatus
 import com.watchpose.handsonar.shared.ChirpHeard
 
 /**
  * 준비 화면(설계 §6.1-1): 추적하는 손(워치를 찬 손, "추적" 버튼으로 왼손·오른손을 고름)이 보이는지, 워치 처프가 들리는지,
  * 표지음 자기 확인이 됐는지. 손·표지음이 녹색이고 장치에 오류가 없으면 시작 버튼이 켜진다.
  * 워치 처프가 안 들리면 확인 창을 거쳐 시작할 수 있다. 이어폰·블루투스 오디오가 연결돼 있으면 경고만 띄운다(표지음이 스피커로 안 나가면
- * 표지음 자기 확인이 녹색이 안 돼 시작이 막힌다).
+ * 표지음 자기 확인이 녹색이 안 돼 시작이 막힌다). 맨 아래에 워치에서 받은 녹음 줄([inbox], 전송 설계 §3)이 있다.
  */
 @Composable
-fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Unit) {
+fun ReadyScreen(ui: UiState, c: SessionController, inbox: InboxStatus, onRequestPermission: () -> Unit) {
     var confirmNoWatch by remember { mutableStateOf(false) }
     // 카메라 오류는 한 번 나면 지워지지 않으므로 시작 조건에 넣지 않는다: 추적하는 손이 보이면 카메라는 돌고 있다.
     // 표지음 시험 중에 시작하면 두 표지음이 겹치므로 막는다.
@@ -118,6 +119,7 @@ fun ReadyScreen(ui: UiState, c: SessionController, onRequestPermission: () -> Un
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            WatchInboxLine(inbox)
         }
     }
     if (confirmNoWatch) {

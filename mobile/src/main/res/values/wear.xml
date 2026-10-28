@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 워치가 이 capability로 폰 앱을 찾는다(전송 설계 §2). 값은 shared TransferProtocol.CAPABILITY와 같아야 한다. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@array/android_wear_capabilities">
+    <string-array name="android_wear_capabilities" translatable="false">
+        <item>hand_sonar_phone</item>
+    </string-array>
+</resources>

@@ -27,6 +27,7 @@ import com.watchpose.handsonar.wear.BuildConfig
 import com.watchpose.handsonar.wear.HandSonarApp
 import com.watchpose.handsonar.wear.Haptics
 import com.watchpose.handsonar.wear.R
+import com.watchpose.handsonar.wear.transfer.TransferService
 import com.watchpose.handsonar.wear.ui.MainActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,6 +47,8 @@ import java.util.Locale
  * 정지·오류·저장 공간 부족이면 녹음과 재생을 멈추고 마지막 조각과 rec.json을 닫는다. 오디오 스레드의 오류는 주 스레드로 넘겨 끝낸다.
  * 자동 정지(설계 §5.1): 시작 인텐트의 분(없으면 설정의 분)이 지나면 틱이 `timer`로 같은 정지 경로를 한 번 타고, 오류가 아니라서 정지 진동이 난다(0이면 하지 않는다).
  * 미디어 볼륨이 0이면 시작하지 않는다(설계 §5.4): 처프가 나가지 않아 녹음 전체가 쓸모없고, 워치 미디어 볼륨은 adb로 바꿀 수 없어 다시 일어나기 쉽다.
+ * 폰으로 보내기(전송 설계 §2): 시작할 때 맨 먼저 보내기를 멈추게 하고(녹음 중에는 보내지 않는다), 멈출 때(이유와 상관없이)와
+ * 시작하다 실패할 때 포그라운드를 내려놓기 전에 [TransferService]를 띄운다.
  */
 class RecorderService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -79,11 +82,14 @@ class RecorderService : LifecycleService() {
 
     /** [autoStopOverride]는 이번 녹음만 설정 대신 쓰는 자동 정지 분이다(원격 시작이 넘긴다). null이면 설정을 따른다. */
     private fun begin(autoStopOverride: Int?) {
+        TransferService.holdForRecording() // 녹음 중에는 보내지 않는다(전송 설계 §2): 보내던 파일을 바로 끊게 한다
         finished = false
         try {
             startInForeground() // startForegroundService 뒤 몇 초 안에 해야 하므로 맨 먼저 한다
         } catch (e: Exception) {
             RecorderState.update { it.copy(running = false, error = "포그라운드 시작 실패: ${e.message ?: e.javaClass.simpleName}") }
+            // 녹음은 열리지 않았다: 맨 앞에서 멈춘 보내기를 다시 잇는다. 백그라운드라 서비스를 못 띄워도 멈춤 표시는 풀린다
+            TransferService.start(this)
             stopSelf()
             return
         }
@@ -93,7 +99,7 @@ class RecorderService : LifecycleService() {
                 setReferenceCounted(false)
                 acquire(WAKE_LOCK_TIMEOUT_MS)
             }
-        val root = File(getExternalFilesDir(null) ?: filesDir, "recordings").apply { mkdirs() }
+        val root = (application as HandSonarApp).recordingsRoot.apply { mkdirs() }
         val free = root.usableSpace
         if (StorageBudget.level(free) == StorageBudget.Level.STOP) {
             failToStart("저장 공간이 부족합니다(남은 녹음 ${String.format(Locale.ROOT, "%.1f", StorageBudget.minutesLeft(free))}분)")
@@ -234,6 +240,8 @@ class RecorderService : LifecycleService() {
         writeLog()
         // 진동은 포그라운드를 내려놓기 전에 낸다: 내려놓은 뒤의 백그라운드 진동은 무시될 수 있다(화면이 꺼진 자동 정지 끝).
         if (error == null) haptics.stop() else haptics.error()
+        // 멈춘 녹음을 폰으로 보낸다(전송 설계 §2). 포그라운드 서비스가 도는 동안이라 백그라운드 시작 제한에 걸리지 않는다.
+        TransferService.start(this)
         releaseAndStop(error)
     }
 
@@ -244,6 +252,7 @@ class RecorderService : LifecycleService() {
         writer?.close()
         folder?.let { dir -> if (dir.listFiles().isNullOrEmpty()) dir.delete() }
         haptics.error() // finish()와 같은 이유로 포그라운드를 내려놓기 전에 낸다
+        TransferService.start(this) // 녹음 시작이 끊은 보내기를 다시 잇는다(같은 까닭으로 내려놓기 전에)
         releaseAndStop(message)
     }
 

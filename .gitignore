@@ -7,8 +7,12 @@ captures/
 *.apk
 *.aab
 
-# 기기마다 다른 설정(SDK 경로)
+# 기기마다 다른 설정(SDK 경로, 서명 키 경로)
 local.properties
+
+# 서명 키 파일은 공개 저장소에 넣지 않는다(README "서명")
+*.keystore
+*.jks
 
 # IDE
 .idea/

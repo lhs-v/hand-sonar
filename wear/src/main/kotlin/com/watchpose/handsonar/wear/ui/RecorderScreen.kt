@@ -37,6 +37,8 @@ import com.watchpose.handsonar.wear.record.RecorderService
 import com.watchpose.handsonar.wear.record.RecorderState
 import com.watchpose.handsonar.wear.record.RecorderStatus
 import com.watchpose.handsonar.wear.record.SonarSettings
+import com.watchpose.handsonar.wear.transfer.TransferState
+import com.watchpose.handsonar.wear.transfer.TransferStatus
 import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -76,11 +78,12 @@ private fun granted(context: Context, permission: String): Boolean =
 
 /**
  * 워치의 유일한 화면(설계 §5.1): 시작·정지, 녹음 시간, 남은 녹음, 볼륨, 재생 끊김, 처프 창·세기, 자동 정지(녹음 중에는 남은 시간).
- * 창·세기·자동 정지는 녹음하지 않을 때만 바꾼다.
+ * 창·세기·자동 정지는 녹음하지 않을 때만 바꾼다. 녹음하지 않을 때는 폰으로 보내기 상태 한 줄이 있다(전송 설계 §2).
  */
 @Composable
 fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> Unit) {
     val status by RecorderState.status.collectAsStateWithLifecycle()
+    val transfer by TransferState.status.collectAsStateWithLifecycle()
     val values by settings.state.collectAsStateWithLifecycle()
     val idle = rememberIdleInfo()
     val now by produceState(SystemClock.elapsedRealtime()) {
@@ -101,7 +104,7 @@ fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> U
                     label = { Text(if (status.running) "정지" else "녹음 시작") },
                 )
             }
-            item { Details(status, idle) }
+            item { Details(status, idle, transfer) }
             if (!status.running) {
                 item {
                     FilledTonalButton(
@@ -151,7 +154,7 @@ private fun rememberIdleInfo(): IdleInfo {
 }
 
 @Composable
-private fun Details(s: RecorderStatus, idle: IdleInfo) {
+private fun Details(s: RecorderStatus, idle: IdleInfo, transfer: TransferStatus) {
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
     val small = MaterialTheme.typography.bodySmall
     val minutesLeft = if (s.running) s.minutesLeft else idle.minutesLeft
@@ -180,8 +183,21 @@ private fun Details(s: RecorderStatus, idle: IdleInfo) {
             )
         }
         if (s.folder.isNotEmpty()) Text("폴더 ${s.folder}", style = small, color = dim, textAlign = TextAlign.Center)
+        if (!s.running) transferLine(transfer)?.let { Text(it, style = small, color = dim, textAlign = TextAlign.Center) }
         s.error?.let { Text(it, style = small, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center) }
     }
+}
+
+/** 녹음하지 않을 때의 폰으로 보내기 한 줄(전송 설계 §2). 할 말이 없으면 null. */
+private fun transferLine(t: TransferStatus): String? = when {
+    t.active && t.file.isNotEmpty() -> {
+        val percent = if (t.total > 0) (t.bytes * 100 / t.total).coerceIn(0L, 100L) else 0L
+        "폰으로 보내는 중 ${t.file} $percent% · 남은 녹음 ${t.pending}개"
+    }
+    t.active -> "폰으로 보내는 중 · 남은 녹음 ${t.pending}개"
+    t.message != null -> t.message
+    t.pending > 0 -> "폰으로 보낼 녹음 ${t.pending}개"
+    else -> null
 }
 
 private fun clock(ms: Long): String {
