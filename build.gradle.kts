@@ -11,12 +11,21 @@ plugins {
 // local.properties에 handsonar.keystore(키 파일 경로, 상대 경로는 이 폴더 기준)가 있으면 그 키로, 없으면 그 PC의 기본 디버그 키로 서명한다.
 // 별칭·암호는 디버그 키 기본값(androiddebugkey / android)이고 handsonar.keyAlias·handsonar.storePassword·handsonar.keyPassword로 바꾼다.
 // 경로가 적혀 있는데 파일이 없으면 멈춘다: 다른 키로 몰래 서명하면 데이터 레이어가 안 이어지고, 깔린 앱 위에 덮어 깔기도 거부된다.
+// 같은 까닭으로 값이 빈 속성(handsonar.keystore= 등)과, 키 경로 없이 적힌 별칭·암호도 실수로 보고 멈춘다(기본 키로 넘어가지 않는다).
 // 키 파일은 저장소에 넣지 않는다(.gitignore가 *.keystore·*.jks를 막는다).
 val localProperties = Properties().apply {
     val file = rootProject.file("local.properties")
     if (file.isFile) file.inputStream().use { load(it) }
 }
-val handSonarKeystore: String? = localProperties.getProperty("handsonar.keystore")?.trim()?.takeIf { it.isNotEmpty() }
+val signingProperties = listOf("handsonar.keystore", "handsonar.keyAlias", "handsonar.storePassword", "handsonar.keyPassword")
+val blankSigning = signingProperties.filter { localProperties.containsKey(it) && localProperties.getProperty(it).isBlank() }
+if (blankSigning.isNotEmpty()) {
+    throw GradleException("local.properties의 ${blankSigning.joinToString(", ")} 값이 비어 있습니다: 값을 적거나 그 줄을 지우세요(비우면 다른 키로 서명됩니다)")
+}
+val handSonarKeystore: String? = localProperties.getProperty("handsonar.keystore")?.trim()
+if (handSonarKeystore == null && signingProperties.drop(1).any { localProperties.containsKey(it) }) {
+    throw GradleException("local.properties에 handsonar.keystore 없이 별칭·암호만 있습니다: 키 파일 경로를 적거나 그 줄을 지우세요")
+}
 
 subprojects {
     pluginManager.withPlugin("com.android.application") {
