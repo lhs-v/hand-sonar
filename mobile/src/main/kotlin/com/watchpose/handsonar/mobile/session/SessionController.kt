@@ -31,6 +31,7 @@ import com.watchpose.handsonar.shared.PhoneAudioJson
 import com.watchpose.handsonar.shared.PromptPlanner
 import com.watchpose.handsonar.shared.RunnerEvent
 import com.watchpose.handsonar.shared.RunnerPhase
+import com.watchpose.handsonar.shared.SensorPlan
 import com.watchpose.handsonar.shared.SessionChecks
 import com.watchpose.handsonar.shared.SessionMeta
 import com.watchpose.handsonar.shared.SessionRunner
@@ -121,9 +122,11 @@ private class FoundMarker(val found: MarkerFound, val elapsedNs: Long?)
  * 장치(카메라·마이크·표지음)와 세션 진행·저장, 화면 상태를 묶는다(설계 §6). 앱 하나에 하나([com.watchpose.handsonar.mobile.HandSonarPhoneApp])라
  * 화면이 다시 만들어져도 세션이 이어진다. 화면은 [ui]·[frame]을 그리고 메서드를 부른다. 메서드는 메인 스레드에서 부른다.
  *
- * 세션 흐름: [startSession] → 폴더·meta.json(시작) → 폰 녹음·프레임 기록 시작 → 0.3 s 뒤 시작 표지음 + [SessionRunner] 시작 →
+ * 세션 흐름: [startSession] → 폴더·meta.json(시작) → 폰 녹음·프레임 기록·폰 센서 기록 시작 → 0.3 s 뒤 시작 표지음 + [SessionRunner] 시작 →
  * 50 ms마다 tick → EndMarkerDue에 끝 표지음 → Finished에 [finishSession](파일 닫기, 끝 표지음 찾기, 통계, meta.json 마무리) → 요약 화면.
  * 취소하면 같은 길로 닫고 status를 trash로 적는다. 앱이 화면에서 벗어나면 세션을 일시정지한다(설계 §6.6).
+ * 폰 센서(전송 설계 §8, 계획 6): 세션 동안 [SensorRecorder]가 가속도·자이로·주변 밝기를 `phone_sensors-NNN.csv`에 적고, 세션을 닫을 때
+ * meta.json(끝)보다 먼저 닫아 그 보고를 meta.json `sensors`에 넣는다. 센서를 못 열어도 세션은 이어 간다.
  */
 class SessionController(private val app: Application) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -163,6 +166,7 @@ class SessionController(private val app: Application) {
 
     @Volatile private var lastHandNs = 0L
     @Volatile private var recorder: FrameRecorder? = null
+    private var sensors: SensorRecorder? = null // 주 스레드만 바꾼다
     @Volatile private var logChirps = false
     private val chirpLock = Any()
     private val chirpLog = ArrayList<Pair<Long, ChirpHeard>>() // 세션 동안 (판정한 elapsedNs, 상태)
@@ -300,6 +304,8 @@ class SessionController(private val app: Application) {
         logChirps = true
         mic.beginSession(File(dir, SessionStore.AUDIO))
         recorder = FrameRecorder(dir)
+        // 폰 센서(전송 설계 §8): 폰이 그대로였는지(가속도·자이로)와 카메라 조건(주변 밝기). 못 열어도 세션은 이어 가고 meta.json에 남긴다.
+        sensors = SensorRecorder(app, dir, SensorPlan.PHONE_BASE, SensorPlan.PHONE).also { it.start() }
         val r = SessionRunner(plan)
         runner = r
         state.update {
@@ -484,6 +490,8 @@ class SessionController(private val app: Application) {
         logChirps = false
         val rec = recorder
         recorder = null
+        val sens = sensors
+        sensors = null
         val endNs = if (r.endNs > 0) r.endNs else SystemClock.elapsedRealtimeNanos()
         val endWallMs = System.currentTimeMillis()
         val started = r.startNs > 0
@@ -506,6 +514,11 @@ class SessionController(private val app: Application) {
                 runCatching {
                     // 소리를 먼저 닫는다: 영상 마무리는 길게 막힐 수 있어(최대 약 12 s) 그동안 WAV가 열린 채 남지 않게.
                     val audio = mic.endSession()
+                    // 센서 CSV도 영상보다 먼저 닫는다(0.5 s 안). end가 적힌 meta.json의 세션은 CSV가 다 닫혀 있다.
+                    val sensorReport = sens?.let {
+                        it.stop()
+                        it.report()
+                    }
                     val videoOk = rec?.close() ?: false
                     val fps = rec?.measuredFps
                     val frameCount = rec?.frames ?: 0L
@@ -545,6 +558,7 @@ class SessionController(private val app: Application) {
                         // 프레임이 하나도 없으면 video.mp4도 없다: video는 null
                         video = rec?.takeIf { it.frames > 0 }?.let { VideoMeta(FrameRecorder.VIDEO_FILE, it.videoWidth, it.videoHeight, it.videoFrames, videoOk) },
                         cancelled = cancelled,
+                        sensors = sensorReport,
                     )
                     store.writeMeta(dir, meta.toJson())
                     SummaryInfo(
