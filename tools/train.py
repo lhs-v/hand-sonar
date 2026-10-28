@@ -502,8 +502,7 @@ def split_frames(ds, mode, args):
                   + " / 검증 블록: " + ", ".join(f"{r['block']}번({r['startSec']:.0f}–{r['startSec'] + dataset.BLOCK_SEC:.0f} s)" for r in table if r["role"] == "val")]
         split = {"blockSec": dataset.BLOCK_SEC, "period": dataset.BLOCK_PERIOD, "offset": args.offset, "testSlots": list(dataset.BLOCK_TEST),
                  "valSlots": list(dataset.BLOCK_VAL), "gapSec": dataset.GAP_SEC, "droppedFrames": dropped, "blocks": table}
-        what = (f"블록 나누기(같은 착용 안 낙관적 상한: 10 s 블록을 고정 무늬로 학습 14 · 검증 3 · 시험 3자리에 흩음, offset {args.offset},"
-                " 경계 뒤 2 s 비움)")
+        what = f"블록 나누기(같은 착용 안 낙관적 상한, 10 s 블록 학습 14 · 검증 3 · 시험 3자리, offset {args.offset}, 경계 뒤 2 s 비움)"
         return (train, val, test), block, split, what, lines
     names = ds["sessions"].tolist()
 
