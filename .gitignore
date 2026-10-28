@@ -24,3 +24,8 @@ mobile/src/main/assets/hand_landmarker.task
 # 수집 데이터는 넣지 않는다(얼굴이 찍힌 영상 포함)
 *.wav
 *.mp4
+
+# PC 도구 결과(프로파일·그림)는 저장소 밖 hand-sonar-data/processed나 보고서 폴더에 둔다. 실수로 생겨도 넣지 않게
+*.npy
+*.npz
+*.png
