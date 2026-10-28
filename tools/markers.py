@@ -3,9 +3,10 @@
 정합 필터를 해석 신호로 한다. 표지음 파형 t와 그 힐베르트 짝으로 만든 복소 형판 a = t + i·H{t}와의 상관
 c[k] = Σ x[k+j]·conj(a[j])의 크기 |c|가 상관 포락선이다. 실수 상관은 22 kHz 반송파를 따라 봉우리가 몇 칸씩 건너뛰지만
 (폰 MarkerDetector는 ±7칸) 포락선은 매끈해서, 가장 큰 칸과 이웃 두 칸에 포물선을 맞추면 샘플보다 잘게 잡힌다(설계 §10: 0.1 ms 안).
-비(ratio) = 포락선 봉우리 / 실수 상관 Re c의 RMS(봉우리 ±GUARD칸, 곧 표지음 길이 안은 뺌). 폰 MarkerDetector는 ±64칸만 빼지만,
-그러면 표지음 자기 옆봉우리가 분모에 들어가 짧은 창에서 비가 크게 낮아진다(실측 워치 끝 표지음 ±0.5 s 창: ±64칸 16, ±1,920칸 92).
-잡음만 있으면 약 4–5다.
+비(ratio) = 포락선 봉우리 / 실수 상관 Re c의 RMS(찾은 후보마다 봉우리 ±GUARD칸, 곧 표지음 길이 안은 뺌). 폰 MarkerDetector는
+±64칸만 빼지만, 그러면 표지음 자기 옆봉우리가 분모에 들어가 짧은 창에서 비가 크게 낮아진다(실측 워치 끝 표지음 ±0.5 s 창: ±64칸 16,
+±1,920칸 92). 가장 센 후보 하나만 빼면 창 안의 다른 표지음이 분모에 들어가, 넓은 창(align.py ±10 s)에 표지음 시험과 시작 표지음이
+함께 있을 때 둘 다 비가 반쯤으로 떨어진다(실측 234109: 따로 255·260, 함께 115·120). 잡음만 있으면 약 4–5다.
 찾은 sample은 x 안에서 표지음이 시작하는 샘플(소수)이다(meta.json micFrame과 같은 뜻).
 """
 import site
@@ -60,20 +61,25 @@ def candidates(x, max_count=5, min_ratio=MIN_RATIO):
         return []
     c = fftconvolve(x, _KERNEL, mode="valid")
     env = np.abs(c)
-    best = int(np.argmax(env))
-    keep = np.ones(len(c), dtype=bool)
-    keep[max(0, best - GUARD): best + GUARD + 1] = False
-    rms = float(np.sqrt(np.mean(c.real[keep] ** 2)))
-    if rms <= 0:
-        return []
-    hits, work = [], env.copy()
-    for _ in range(max_count):
+    power = c.real ** 2
+    keep = np.ones(len(c), dtype=bool)  # 분모에 넣을 칸: 찾은 후보마다 ±GUARD를 뺀다
+    peaks, work = [], env.copy()
+    while len(peaks) < max_count:
         k = int(np.argmax(work))
-        if work[k] < min_ratio * rms:
+        trial = keep.copy()
+        trial[max(0, k - GUARD): k + GUARD + 1] = False
+        if not trial.any():
             break
-        hits.append(Hit(k + _parabola(env, k), float(env[k] / rms)))
+        rms = float(np.sqrt(np.mean(power[trial])))
+        if rms <= 0 or work[k] < min_ratio * rms:
+            break
+        keep = trial
+        peaks.append(k)
         work[max(0, k - SEPARATION): k + SEPARATION + 1] = 0.0
-    return hits
+    if not peaks:
+        return []
+    rms = float(np.sqrt(np.mean(power[keep])))
+    return [Hit(k + _parabola(env, k), float(env[k] / rms)) for k in peaks]
 
 
 def find(x, min_ratio=MIN_RATIO):

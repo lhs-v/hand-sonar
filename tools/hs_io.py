@@ -3,8 +3,11 @@
 - 워치 녹음 폴더(설계 §7.1): rec.json과 part-NNN.wav. 조각은 firstFrame으로 잇고, 닫히지 않았거나 잘린 조각은 파일 크기로 잰다
   (check_recording.wav_frames). 처음부터 빈틈 없이 이어지는 데까지만 읽는다.
 - recordClock(설계 §7.1): [위치, elapsedNs, 읽은 수]. 위치나 시각이 앞으로 가지 않은 줄은 새 측정이 아니라 뺀다
-  (check_recording.forward_rows). 이웃 줄의 |시각 간격 − 위치 간격/48 kHz|가 0.02 s를 넘으면 샘플이 빠진 계단이라 그 자리에서
-  직선을 나누고, 조각마다 최소제곱 직선으로 위치 ↔ elapsedNs를 바꾼다. 줄마다 시각이 0.7 ms까지 흔들려 점을 그대로 잇지 않는다.
+  (check_recording.forward_rows). 한 줄만 3 ms 넘게 튀었다가 곧바로(반 넘게) 되돌아오는 줄은 늦게 찍힌 시각이라 뺀다(실데이터 폰
+  +10.8·+7.9 ms. 빼지 않으면 25 ms 튐 하나가 계단 둘과 한 줄짜리 조각을 만들어 그 1 s를 통째로 틀리게 한다). 그다음 이웃 줄의
+  |시각 간격 − 위치 간격/48 kHz|가 0.02 s를 넘으면 샘플이 빠진 계단이라 그 자리에서 직선을 나누고, 조각마다 최소제곱 직선으로
+  위치 ↔ elapsedNs를 바꾼다(직선에서 1 ms 넘게 벗어난 줄은 빼고 한 번 다시 맞춘다). 줄마다 시각이 0.7 ms까지 흔들려 점을 그대로
+  잇지 않는다. 계단은 두 시각 줄 사이 어딘가에서 났으므로 그 구간(앞 줄 위치, 뒤 줄 위치]으로 적는다.
 - 폰 세션 폴더(설계 §7.2·§8.1): meta.json, phone_audio.wav·json, prompts.csv, landmarks.csv.
   휴지통·되살리기로 다시 쓴 meta.json은 org.json 모양이라 1.0이 1로 바뀌므로 숫자는 float()로 받고, 키가 없으면 기본값을 쓴다.
   쓸 세션은 status가 kept이고 end·stats가 있는 것뿐이다(chosen).
@@ -23,7 +26,9 @@ import numpy as np  # noqa: E402
 from check_recording import HEADER_BYTES, forward_rows, wav_frames  # noqa: E402
 
 RATE = 48_000
-STEP_SEC = 0.02  # check_recording.MAX_TIMESTAMP_STEP_SEC와 같다. 실기기 녹음의 이웃 줄 어긋남은 최대 0.97 ms였다
+STEP_SEC = 0.02  # check_recording.MAX_TIMESTAMP_STEP_SEC와 같다. 실기기 워치 녹음의 이웃 줄 어긋남은 최대 0.97 ms, 폰은 한 줄 튐 +10.8 ms
+SPIKE_NS = 3e6  # 한 줄 튐: 앞 줄보다도 뒤 줄보다도 같은 쪽으로 3 ms 넘게 벗어나고 뒤 줄이 반 넘게 되돌아오면 그 줄만 뺀다(워치 흔들림 최대 0.97 ms의 3배)
+OUTLIER_NS = 1e6  # 조각 직선에서 이만큼(흔들림이 크면 그 4σ) 넘게 벗어난 줄은 빼고 한 번 다시 맞춘다(실데이터 폰: 1–4 ms 늦은 줄 8개가 표지음 시각을 0.1 ms 치우침)
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(TOOLS)
 DEFAULT_DATA = os.path.join(os.path.dirname(REPO), "hand-sonar-data")  # 저장소 옆 데이터 폴더(설계 §7.3)
@@ -48,7 +53,7 @@ def nanos(d, key):
 
 
 class Clock:
-    """녹음 위치(프레임) ↔ elapsedNs. 계단마다 나눈 최소제곱 직선 조각들."""
+    """녹음 위치(프레임) ↔ elapsedNs. 한 줄 튐을 뺀 뒤 계단마다 나눈 최소제곱 직선 조각들."""
 
     def __init__(self, rows, rate=RATE):
         kept, self.stale = forward_rows(rows)
@@ -56,13 +61,27 @@ class Clock:
             raise ValueError(f"앞으로 간 녹음 시각 줄이 {len(kept)}개뿐")
         pos = np.array([r[0] for r in kept], dtype=np.float64)
         t = np.array([r[1] for r in kept], dtype=np.float64)
-        gap = np.diff(t) / 1e9 - np.diff(pos) / rate
-        cuts = [0] + [int(k) + 1 for k in np.flatnonzero(np.abs(gap) > STEP_SEC)] + [len(kept)]
-        self.steps = [(float(pos[k]), float(gap[k - 1] * 1e9)) for k in cuts[1:-1]]  # (계단 뒤 첫 위치, 계단 ns)
+        e = (t - t[0]) - (pos - pos[0]) / rate * 1e9  # 시각 − 위치 시간(ns): 고르면 거의 상수, 샘플이 빠지면 계단, 늦게 찍힌 줄은 튐
+        u, v = e[1:-1] - e[:-2], e[2:] - e[1:-1]  # 줄 k의 앞 줄 대비·뒤 줄의 k 대비 어긋남(k = 1 … n−2)
+        spike = np.zeros(len(pos), dtype=bool)
+        spike[1:-1] = (np.abs(u) > SPIKE_NS) & (np.abs(v) > SPIKE_NS) & (u * v < 0) & (np.abs(u + v) <= 0.5 * np.abs(u))
+        self.spikes = [(float(p), float(d)) for p, d in zip(pos[1:-1][spike[1:-1]], u[spike[1:-1]])]  # 뺀 줄 (위치, 튐 ns)
+        pos, t, e = pos[~spike], t[~spike], e[~spike]
+        gap = np.diff(e)  # 이웃 줄의 시각 간격 − 위치 간격(ns)
+        cuts = [0] + [int(k) + 1 for k in np.flatnonzero(np.abs(gap) > STEP_SEC * 1e9)] + [len(pos)]
+        self.steps = [(float(pos[k - 1]), float(pos[k]), float(gap[k - 1])) for k in cuts[1:-1]]  # (앞 줄 위치, 뒤 줄 위치, 계단 ns)
         starts, ns0, slope = [], [], []
+        self.outliers = 0  # 조각 직선에서 벗어나 다시 맞출 때 뺀 줄 수
         for a, b in zip(cuts, cuts[1:]):
             p, q = pos[a:b] - pos[a], t[a:b] - t[a]
             k = np.polyfit(p, q, 1) if len(p) >= 2 else (1e9 / rate, 0.0)
+            if len(p) >= 5:
+                res = q - np.polyval(k, p)
+                res -= np.median(res)
+                keep = np.abs(res) <= max(OUTLIER_NS, 4 * 1.4826 * float(np.median(np.abs(res))))
+                if 3 <= keep.sum() < len(p):
+                    k = np.polyfit(p[keep], q[keep], 1)
+                    self.outliers += int((~keep).sum())
             starts.append(pos[a])
             ns0.append(t[a] + k[1])
             slope.append(k[0])
@@ -79,8 +98,8 @@ class Clock:
         return self.starts[i] + (t - self.ns0[i]) / self.ns_per_frame[i]
 
     def steps_between(self, f1, f2):
-        """f1 < 위치 ≤ f2에 있는 계단 [(위치, ns)]."""
-        return [s for s in self.steps if f1 < s[0] <= f2]
+        """구간 (앞 줄 위치, 뒤 줄 위치]이 (f1, f2]와 겹치는 계단 [(앞 줄 위치, 뒤 줄 위치, ns)]. 계단은 그 구간 어딘가에서 났다."""
+        return [s for s in self.steps if s[0] < f2 and s[1] > f1]
 
 
 @dataclass
@@ -305,8 +324,19 @@ def processed_folder(data, name):
 
 
 def write_json(path, value):
-    with open(path, "w", encoding="utf-8") as f:
+    """임시 파일에 다 쓴 뒤 이름을 바꾼다(중간에 멈춰도 반쯤 쓴 파일이 남지 않게)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(value, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def guarded(name, fn, *args):
+    """fn(*args) → (보고 줄, 됐는가). 예외가 나면 그 세션만 실패로 적는다(한 세션이 넘어져도 뒤 세션을 처리한다)."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001  세션마다 따로 실패시키려고 모두 받는다
+        return [f"{name}: 처리 중 오류로 실패({type(e).__name__}: {e})"], False
 
 
 def pyplot():

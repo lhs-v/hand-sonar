@@ -6,17 +6,26 @@
    포락선으로 다시 찾고(markers.py), phone_audio.json recordClock으로 폰 elapsedNs로 바꾼다. 낸 시각(playNs) 뒤 0–0.5 s
    (실측 111–113 ms) 밖이면 못 찾음이다. phone_audio.json이 없으면 폰 WAV를 쓰지 않는다.
 2. 워치 녹음: 두 기기의 wallMs로 폰 표지음 시각을 워치 시각으로 옮겨, 그 시각을 담은 녹음을 고른다. 시스템 시각은 찾을 범위를
-   좁히는 데만 쓴다(설계 §4).
-3. 워치 시작 표지음: 시스템 시각으로 옮긴 예상 위치 ±2 s에서 후보를 찾는다. 같은 녹음에 준비 화면의 "표지음 시험"과 잡음 봉우리
-   (비 20–36)가 있어서, 예상 위치에 가까운 후보부터 폰 표지음 간격만큼 뒤 ±0.5 s에서 끝 표지음을 찾고, 두 기기 간격이 0.02 s 안에서
-   맞는 첫 후보를 쓴다(시작 버튼 소리 같은 잡음이 시작 표지음 0.3 s 앞에 있어도 간격이 0.3 s 어긋나 걸러진다).
+   좁히는 데만 쓴다(설계 §4). 두 기기의 벽시계는 초 단위로 어긋날 수 있다(실측: 10-27 23:51 전 워치가 폰보다 약 4.07 s 앞섰고,
+   녹음 235007 안에서 −3,850 ms 계단으로 고쳐졌다). 녹음마다 rec.json start·stop의 부팅 시각(wallMs − elapsedNs/1e6)을 견줘
+   벽시계 계단을 알린다(평소 ±0.6 ms).
+3. 워치 시작 표지음: 예상 위치 ±10 s에서 후보를 찾는다. 이 창에는 준비 화면의 "표지음 시험"(실측 두 세션 모두 시작 표지음 3.6 s 앞),
+   딸깍 소리, 잡음 봉우리가 든다. 그래서 고르기는 짝 검사가 한다: 시작 후보마다 폰 표지음 간격만큼 뒤 ±0.5 s의 끝 후보 중 두 기기
+   간격이 0.02 s 안에서 맞는 것을 찾고, 짝의 두 후보가 모두 처프일 수 있는 소리(아래 대역 상승 비 ≥ 5)여야 한다. 짝이 여럿이면
+   간격이 가장 잘 맞는 것을 쓴다.
 4. 두 표지음이 한 녹음 안에 있고 그 사이에 녹음 계단(샘플 빠짐)이 없으면 두 점으로 직선을 만든다(method "two", "표지음 둘").
-   조각 빈틈이 있으면 그 뒤는 읽지 않으므로 끝 표지음을 못 찾는다. 세션 도중 워치 녹음이 멈췄다 다시 켜졌으면 두 표지음이 다른 녹음에
-   든다. 그런 때는 찾은 표지음 하나와 워치 녹음 시각(시스템 시각의 빠르기)으로 맞춘다(method "one", "표지음 하나"). 하나도 없으면
-   method "none"과 이유를 적는다.
-5. 시스템 시각 직선(워치 wallMs = 폰 wallMs로 봄)도 만들어, 표지음 직선과의 차이를 표지음 자리에서 ms로 적는다.
+   계단이 있으면 짝의 시작 표지음 하나로 맞춘다. 세 간격(워치 샘플, 폰 elapsedNs, 폰 WAV)이 2 ms 넘게 다르면 경고한다.
+5. 짝이 없으면 표지음 하나로 맞추되(method "one", "표지음 하나": 찾은 표지음과 워치 녹음 시각의 빠르기), 아래를 모두 요구하고
+   못 맞추면 method "none"과 이유를 적는다. 틀린 맞춤을 내보내느니 없음으로 둔다(학습 정답).
+   - 처프 모양: 후보 40 ms의 21.5–23 kHz 세기가 둘레 ±1 s 40 ms 조각들의 중앙값보다 100배 넘게 솟고, 2–17 kHz는 10배 안이다
+     (실측 표지음·표지음 시험 504–4,147배 / 0.7–3.6배, 딸깍은 2–17 kHz가 1,593–58,447배).
+   - 창 안의 처프일 수 있는 소리(21.5–23 kHz 상승 ÷ 2–17 kHz 상승 ≥ 5) 중 하나뿐이거나, 시작 표지음이면 그중 마지막 것.
+     표지음 시험은 늘 시작 표지음 앞에 오고 세션 중에는 표지음이 나지 않는다. 다만 세션이 창보다 짧아 다음 세션의 소리가 창에
+     들 수 있으면(처음 후보 + 세션 길이 ≤ 창 끝) 고르지 않는다. 끝 표지음은 하나뿐일 때만 쓴다.
+   - "표지음 하나"는 verify_sync.py의 지연 확인(1프레임 안, 상관 ≥ 문턱)을 지나야 pairs.py가 쓴다.
+6. 시스템 시각 직선(워치 wallMs = 폰 wallMs로 봄)도 만들어, 표지음 직선과의 차이를 표지음 자리에서 ms로 적는다.
 폰 스피커에서 폰 마이크와 워치 마이크까지의 소리 길이 차(50 cm면 약 1.5 ms)는 고정 지연이라 verify_sync.py가 재는 지연에 들어간다.
-결과는 processed/<세션>/align.json. 모든 세션이 "표지음 둘"이 아니면 끝 코드 1로 끝난다.
+결과는 processed/<세션>/align.json. 모든 세션이 "표지음 둘"이 아니면(처리 중 오류 포함) 끝 코드 1로 끝난다.
 """
 import argparse
 import os
@@ -31,11 +40,18 @@ import numpy as np  # noqa: E402
 RATE = hs_io.RATE
 PHONE_SEARCH_SEC = 0.05  # 폰 WAV에서 micFrame 앞뒤로 다시 찾는 폭(폰 찾기의 흔들림 ±0.15 ms보다 넉넉히)
 MAX_PLAY_DELAY_SEC = 0.5  # 낸 시각 뒤 이 안에 폰 마이크에 들어와야 같은 소리다(실측 111–113 ms, 설계 §8.1)
-START_WINDOW_SEC = 2.0  # 워치 시작 표지음을 찾는 폭(예상 위치 ±). 실측 시스템 시각 어긋남 0.21 s
+START_WINDOW_SEC = 10.0  # 워치 시작 표지음을 찾는 폭(예상 위치 ±). 실측 벽시계 어긋남 4.07 s의 2배 넘게. 고르기는 짝 검사가 한다
 END_WINDOW_SEC = 0.5  # 워치 끝 표지음을 찾는 폭(시작 + 폰 간격 ±, 설계 §8.1)
 PAIR_TOLERANCE_SEC = 0.02  # 두 기기 표지음 간격이 이만큼 안에서 같아야 짝이다(시계 차 90 ppm × 218 s도 덮음, 실측 2.7 ppm)
-MAX_CANDIDATES = 5
-STRONG_FRACTION = 0.5  # 짝이 없을 때: 가장 센 후보의 이 비율 이상인 것 중 예상 위치에 가장 가까운 후보(표지음 시험은 비슷하게 세고 잡음은 훨씬 약함)
+MAX_CANDIDATES = 20  # 창 하나에서 볼 후보 수. 20 s 창에는 잡음 후보(비 8–27)가 여럿 든다(실측 4 s 창의 9–17%에 하나 이상)
+INTERVAL_WARN_SEC = 0.002  # 세 간격이 이보다 다르면 경고(실측 0.2–0.7 ms. 폰 시각 튐이나 잘못 잡은 표지음)
+WALL_STEP_NOTE_MS = 50.0  # 워치 녹음 start·stop 부팅 시각 차가 이보다 크면 녹음 중 벽시계가 바뀐 것으로 알린다(평소 ±0.6 ms)
+SHAPE_REF_SEC = 1.0  # 처프 모양: 후보 둘레 이 폭의 40 ms 조각들 세기의 중앙값을 기준으로 삼는다(후보 ±0.1 s는 뺌)
+MARKER_BAND = (21_500.0, 23_000.0)
+OTHER_BAND = (2_000.0, 17_000.0)  # 워치 처프(18–21 kHz)를 뺀 아래 대역. 딸깍·말소리가 여기 든다
+MIN_MARKER_RISE = 100.0  # 표지음 하나로 맞출 때 21.5–23 kHz 상승 하한(실측 처프 504–4,147배)
+MAX_OTHER_RISE = 10.0  # 같은 때 2–17 kHz 상승 상한(실측 처프 0.7–3.6배, 처프가 아닌 후보 135개 중 위 하한과 함께 넘는 것 없음)
+LIKE_RATIO = 5.0  # 처프일 수 있는 소리: 21.5–23 kHz 상승 ÷ 2–17 kHz 상승이 이 이상(실측 처프 139–6,334, 처프 아닌 후보 135개 중 6개, 최대 26)
 LABELS = {"two": "표지음 둘", "one": "표지음 하나", "none": "표지음 없음"}
 
 
@@ -65,15 +81,28 @@ def phone_marker(session, key):
     return out
 
 
+def wall_step_ms(recording):
+    """rec.json stop과 start의 부팅 시각(wallMs − elapsedNs/1e6) 차(ms). 녹음 중 벽시계가 바뀌면 0이 아니다. stop이 없으면 None."""
+    start, stop = recording.rec.get("start"), recording.rec.get("stop")
+    try:
+        boot = [hs_io.num(p, "wallMs") - hs_io.nanos(p, "elapsedNs") / 1e6 for p in (start, stop)]
+    except TypeError:  # 키가 없음(녹음 중이거나 앱이 죽음)
+        return None
+    return boot[1] - boot[0]
+
+
 def locate(session, recordings, phone_ns):
-    """폰 시각을 시스템 시각으로 워치 녹음 위치로 옮긴다: (녹음, 예상 프레임) 또는 (None, None)."""
+    """폰 시각을 시스템 시각으로 워치 녹음 위치로 옮긴다: (녹음, 예상 프레임) 또는 (None, None).
+    예상 위치를 담은 녹음을 먼저, 없으면 START_WINDOW_SEC 안에서 가장 가까운 녹음."""
     wall = session.ns_to_wall_ms(phone_ns)
     margin = START_WINDOW_SEC * RATE
+    best = None
     for r in recordings:
         f = float(r.clock.frames(r.wall_ms_to_ns(wall)))
-        if -margin <= f < r.frames + margin:
-            return r, f
-    return None, None
+        outside = max(0.0, -f, f - r.frames)
+        if outside <= margin and (best is None or outside < best[0]):
+            best = (outside, r, f)
+    return (best[1], best[2]) if best else (None, None)
 
 
 def search(recording, center, half_sec, max_count):
@@ -85,10 +114,70 @@ def search(recording, center, half_sec, max_count):
     return [(a + h.sample, h.ratio) for h in markers.candidates(recording.read(a, b), max_count)]
 
 
-def pick(cands, center):
-    """짝 없이 하나를 고를 때: 가장 센 후보의 STRONG_FRACTION 이상인 것 중 예상 위치에 가장 가까운 것."""
-    strong = max(r for _, r in cands) * STRONG_FRACTION
-    return min((c for c in cands if c[1] >= strong), key=lambda c: abs(c[0] - center))
+_FREQS = np.fft.rfftfreq(markers.SAMPLES, 1 / RATE)
+_IN = (_FREQS >= MARKER_BAND[0]) & (_FREQS < MARKER_BAND[1])
+_OUT = (_FREQS >= OTHER_BAND[0]) & (_FREQS < OTHER_BAND[1])
+
+
+def band_rise(recording, frame):
+    """후보(표지음 시작 프레임) 40 ms의 대역 세기 ÷ 둘레 ±1 s 40 ms 조각들의 중앙값: (21.5–23 kHz 상승, 2–17 kHz 상승).
+    둘레가 모자라면(녹음 끝) (0, inf)."""
+    n = markers.SAMPLES
+    s = int(round(frame))
+    a, b = max(0, s - int(SHAPE_REF_SEC * RATE)), min(recording.frames, s + int(SHAPE_REF_SEC * RATE) + n)
+    if s < a or s + n > b:
+        return 0.0, float("inf")
+    x = recording.read(a, b)
+    starts = [k for k in range(0, len(x) - n + 1, n) if abs(a + k - s) >= markers.SEPARATION]
+    if len(starts) < 10:
+        return 0.0, float("inf")
+    window = np.hanning(n)
+    spec = np.abs(np.fft.rfft(np.stack([x[k: k + n] for k in starts + [s - a]]) * window, axis=1)) ** 2
+    ref, cand = spec[:-1], spec[-1]
+    rise_in = cand[_IN].sum() / max(float(np.median(ref[:, _IN].sum(axis=1))), 1e-12)
+    rise_out = cand[_OUT].sum() / max(float(np.median(ref[:, _OUT].sum(axis=1))), 1e-12)
+    return float(rise_in), float(rise_out)
+
+
+def maybe_chirp(rise):
+    """처프일 수 있는 소리(짝 검사와 고르기의 셈에 넣음): 21.5–23 kHz만 2–17 kHz보다 LIKE_RATIO배 넘게 솟음."""
+    return rise[0] >= LIKE_RATIO * rise[1]
+
+
+def is_marker(rise):
+    """표지음 하나로 맞출 때의 처프 모양: 21.5–23 kHz는 크게 솟고 2–17 kHz는 거의 그대로."""
+    return rise[0] >= MIN_MARKER_RISE and rise[1] <= MAX_OTHER_RISE
+
+
+def _hit(frame, ratio, rise):
+    return {"frame": frame, "ratio": ratio, "markerRise": rise[0], "otherRise": rise[1]}
+
+
+def single_marker(recording, center, key, span_frames, notes):
+    """짝 없이 표지음 하나를 고른다(위 docstring 5). (프레임, 비, 상승) 또는 None(이유는 notes에)."""
+    name = "시작" if key == "start" else "끝"
+    cands = search(recording, center, START_WINDOW_SEC, MAX_CANDIDATES)
+    rises = {f: band_rise(recording, f) for f, _ in cands}
+    likes = sorted((f, r) for f, r in cands if maybe_chirp(rises[f]))
+    if not likes:
+        notes.append(f"{name} 표지음 하나: 창 안에 처프일 수 있는 소리가 없음(센 후보 {len(cands)}개)")
+        return None
+    window_end = center + START_WINDOW_SEC * RATE
+    if len(likes) == 1:
+        frame, ratio = likes[0]
+    elif key == "start" and likes[0][0] + span_frames > window_end:
+        frame, ratio = likes[-1]  # 표지음 시험은 시작 표지음 앞에 온다
+        notes.append(f"시작 표지음 하나: 처프일 수 있는 소리 {len(likes)}개({', '.join(f'{f / RATE:.3f} s' for f, _ in likes)}) 중 마지막")
+    else:
+        why = "세션이 창보다 짧아 다음 세션 소리와 가를 수 없음" if key == "start" else "끝 표지음은 하나뿐일 때만 씀"
+        notes.append(f"{name} 표지음 하나: 처프일 수 있는 소리 {len(likes)}개({', '.join(f'{f / RATE:.3f} s' for f, _ in likes)}) 중 고르지 않음({why})")
+        return None
+    rise = rises[frame]
+    if not is_marker(rise):
+        notes.append(f"{name} 표지음 하나: {frame / RATE:.3f} s가 처프 모양이 아님(21.5–23 kHz {rise[0]:.0f}배 < {MIN_MARKER_RISE:.0f}배"
+                     f" 또는 2–17 kHz {rise[1]:.1f}배 > {MAX_OTHER_RISE:.0f}배)")
+        return None
+    return frame, ratio, rise
 
 
 def align_session(session, recordings):
@@ -103,57 +192,90 @@ def align_session(session, recordings):
             notes.append(f"폰 마이크가 도중에 멈춤(녹음 {session.audio.frames / RATE:.1f} s < 세션 {duration:.1f} s)")
     rs, fs = locate(session, recordings, ps["ns"]) if ps["found"] else (None, None)
     re_, fe = locate(session, recordings, pe["ns"]) if pe["found"] else (None, None)
-    starts = sorted(search(rs, fs, START_WINDOW_SEC, MAX_CANDIDATES), key=lambda c: abs(c[0] - fs)) if rs else []
+    out["wallStepMs"] = {}
+    for r in {id(r): r for r in (rs, re_) if r is not None}.values():
+        step = wall_step_ms(r)
+        out["wallStepMs"][r.name] = step
+        if step is not None and abs(step) > WALL_STEP_NOTE_MS:
+            notes.append(f"워치 녹음 {r.name} 안에서 벽시계가 {step:+.1f} ms 바뀜(그만큼 시스템 시각 예상 위치가 틀릴 수 있음,"
+                         f" 찾는 창 ±{START_WINDOW_SEC:.0f} s)")
+    starts = search(rs, fs, START_WINDOW_SEC, MAX_CANDIDATES) if rs else []
     watch = {"start": None, "end": None, "startCandidates": len(starts)}
     out["watch"] = watch
 
     pair = None
     if rs is not None and rs is re_:
         gap = (pe["ns"] - ps["ns"]) * RATE / 1e9
+        rises = {}
+
+        def rise(f):
+            if f not in rises:
+                rises[f] = band_rise(rs, f)
+            return rises[f]
+
+        found, misses = [], []
         for s1, r1 in starts:
-            ends = search(rs, s1 + gap, END_WINDOW_SEC, 1)
-            if ends and abs(ends[0][0] - s1 - gap) <= PAIR_TOLERANCE_SEC * RATE:
-                pair = ((s1, r1), ends[0])
-                break
-            if ends:
-                notes.append(f"후보 {s1 / RATE:.3f} s: 끝 표지음 간격이 {(ends[0][0] - s1 - gap) / RATE * 1e3:+.0f} ms 어긋나 버림")
-        if pair is None:
-            notes.append("두 표지음의 짝을 못 찾음")
+            ends = search(rs, s1 + gap, END_WINDOW_SEC, MAX_CANDIDATES)
+            close = [(s2, r2) for s2, r2 in ends if abs(s2 - s1 - gap) <= PAIR_TOLERANCE_SEC * RATE]
+            if not close:
+                if ends:
+                    miss = min((e[0] - s1 - gap for e in ends), key=abs)
+                    misses.append(f"{s1 / RATE:.3f} s(간격 {miss / RATE * 1e3:+.0f} ms 어긋남)")
+                continue
+            s2, r2 = min(close, key=lambda e: abs(e[0] - s1 - gap))
+            if maybe_chirp(rise(s1)) and maybe_chirp(rise(s2)):
+                found.append((abs(s2 - s1 - gap), (s1, r1), (s2, r2)))
+            else:
+                misses.append(f"{s1 / RATE:.3f} s(간격은 맞으나 처프 모양이 아님)")
+        if found:
+            found.sort(key=lambda p: p[0])
+            pair = found[0][1:]
+            if len(found) > 1:
+                notes.append(f"짝이 {len(found)}개라 간격이 가장 잘 맞는 것을 씀(어긋남 {found[0][0] / RATE * 1e3:.2f} ms, 다음 {found[1][0] / RATE * 1e3:.2f} ms)")
+        else:
+            notes.append("두 표지음의 짝을 못 찾음" + (f"(끝 후보는 있으나 간격이 안 맞는 시작 후보: {', '.join(misses[:5])})" if misses else ""))
     elif ps["found"] and pe["found"]:
         notes.append("두 표지음이 다른 녹음에 있음(세션 도중 워치 녹음이 멈췄다 다시 켜졌을 수 있음)" if rs and re_ else
                      "표지음 시각을 담은 워치 녹음이 하나뿐이거나 없음")
 
-    single = None  # (키, 녹음, 프레임, 비, 폰 표지음)
+    single = None  # (키, 녹음, 프레임, 폰 표지음)
     if pair is not None:
         (s1, r1), (s2, r2) = pair
-        watch["start"], watch["end"] = {"frame": s1, "ratio": r1}, {"frame": s2, "ratio": r2}
+        watch["start"], watch["end"] = _hit(s1, r1, rises[s1]), _hit(s2, r2, rises[s2])
         steps = rs.clock.steps_between(s1, s2)
         if steps:
-            notes.append("표지음 사이에 녹음 계단: " + ", ".join(f"{f / RATE:.1f} s {ns / 1e6:+.1f} ms" for f, ns in steps))
-            single = ("start", rs, s1, r1, ps)
+            notes.append("표지음 사이에 녹음 계단: " + ", ".join(f"{a / RATE:.1f}–{b / RATE:.1f} s {ns / 1e6:+.1f} ms" for a, b, ns in steps))
+            single = ("start", rs, s1, ps)  # 짝으로 확인된 시작 표지음
         else:
             slope = (pe["ns"] - ps["ns"]) / (s2 - s1)
             out.update(method="two", recording=rs.name, line={"frame0": s1, "ns0": ps["ns"], "nsPerFrame": slope})
             watch_ns = rs.clock.ns(np.array([s1, s2]))
-            out["intervals"] = {"watchSec": (s2 - s1) / RATE, "phoneSec": (pe["ns"] - ps["ns"]) / 1e9,
-                                "phoneWavSec": (pe["frame"] - ps["frame"]) / RATE}
+            iv = {"watchSec": (s2 - s1) / RATE, "phoneSec": (pe["ns"] - ps["ns"]) / 1e9, "phoneWavSec": (pe["frame"] - ps["frame"]) / RATE}
+            out["intervals"] = iv
+            out["intervalSpreadMs"] = (max(iv.values()) - min(iv.values())) * 1e3
+            if out["intervalSpreadMs"] > INTERVAL_WARN_SEC * 1e3:
+                notes.append(f"경고: 세 간격이 {out['intervalSpreadMs']:.2f} ms 다름({INTERVAL_WARN_SEC * 1e3:.0f} ms 넘음,"
+                             " 폰 시각 튐이나 잘못 잡은 표지음일 수 있음)")
             out["clockPpm"] = ((pe["ns"] - ps["ns"]) / float(watch_ns[1] - watch_ns[0]) - 1) * 1e6
-    elif starts:
-        s1, r1 = pick(starts, fs)
-        watch["start"] = {"frame": s1, "ratio": r1}
-        single = ("start", rs, s1, r1, ps)
-    elif re_ is not None:
-        ends = search(re_, fe, START_WINDOW_SEC, MAX_CANDIDATES)
-        if ends:
-            s2, r2 = pick(ends, fe)
-            watch["end"] = {"frame": s2, "ratio": r2}
-            single = ("end", re_, s2, r2, pe)
+    else:
+        end_ns = hs_io.nanos(session.meta.get("end"), "elapsedNs")
+        if rs is not None:
+            span = (end_ns - ps["ns"]) * RATE / 1e9 if end_ns is not None else 0.0  # 시작 표지음부터 세션 끝까지(워치 프레임)
+            got = single_marker(rs, fs, "start", span, notes)
+            if got:
+                watch["start"] = _hit(*got)
+                single = ("start", rs, got[0], ps)
+        if single is None and re_ is not None:
+            got = single_marker(re_, fe, "end", 0.0, notes)
+            if got:
+                watch["end"] = _hit(*got)
+                single = ("end", re_, got[0], pe)
     if single is not None:
-        key, rec, frame, _, pm = single
+        key, rec, frame, pm = single
         out.update(method="one", recording=rec.name, line={"offsetNs": pm["ns"] - float(rec.clock.ns(frame))})
-        notes.append(f"{'시작' if key == 'start' else '끝'} 표지음 하나와 워치 녹음 시각으로 맞춤")
+        notes.append(f"{'시작' if key == 'start' else '끝'} 표지음 하나와 워치 녹음 시각으로 맞춤(verify_sync 확인을 지나야 pairs가 씀)")
     if out["method"] == "none":
-        notes.append("워치 녹음에서 표지음을 못 찾음" if ps["found"] or pe["found"] else "폰 표지음이 둘 다 없음")
+        notes.append("워치 녹음에서 쓸 표지음을 못 찾음" if ps["found"] or pe["found"] else "폰 표지음이 둘 다 없음")
     out["label"] = LABELS[out["method"]]
 
     if out["recording"] is not None:
@@ -218,16 +340,28 @@ def report(info):
     parts = []
     for key, name in (("start", "시작"), ("end", "끝")):
         w = info["watch"][key]
-        parts.append(f"{name} {w['frame'] / RATE:.3f} s(비 {w['ratio']:.0f})" if w else f"{name} 없음")
-    lines.append(f"  워치 표지음: {', '.join(parts)}, 시작 후보 {info['watch']['startCandidates']}개")
+        parts.append(f"{name} {w['frame'] / RATE:.3f} s(비 {w['ratio']:.0f}, 21.5–23 kHz {w['markerRise']:.0f}배, 2–17 kHz {w['otherRise']:.1f}배)"
+                     if w else f"{name} 없음")
+    lines.append(f"  워치 표지음: {', '.join(parts)}, 시작 창(±{START_WINDOW_SEC:.0f} s) 후보 {info['watch']['startCandidates']}개")
     if "intervals" in info:
         iv = info["intervals"]
-        lines.append(f"  간격: 워치 {iv['watchSec']:.4f} s(48 kHz로 셈), 폰 elapsedNs {iv['phoneSec']:.4f} s, 폰 WAV {iv['phoneWavSec']:.4f} s,"
-                     f" 두 기기 시계 빠르기 차 {info['clockPpm']:+.1f} ppm")
+        lines.append(f"  간격: 워치 {iv['watchSec']:.4f} s(48 kHz로 셈), 폰 elapsedNs {iv['phoneSec']:.4f} s, 폰 WAV {iv['phoneWavSec']:.4f} s"
+                     f"(서로 {info['intervalSpreadMs']:.2f} ms 안), 두 기기 시계 빠르기 차 {info['clockPpm']:+.1f} ppm")
     if info.get("wallDiffMs"):
         lines.append("  표지음 − 시스템 시각 맞춤: " + ", ".join(f"{'시작' if k == 'start' else '끝'} {v:+.1f} ms" for k, v in info["wallDiffMs"].items()))
+    steps = info.get("wallStepMs") or {}
+    if steps:
+        lines.append("  워치 녹음 벽시계 계단(stop − start 부팅 시각): " + ", ".join(
+            f"{n} {'stop 없음' if v is None else f'{v:+.1f} ms'}" for n, v in steps.items()))
     lines += [f"  메모: {n}" for n in info["notes"]]
     return lines
+
+
+def run(data, name, recordings):
+    """세션 하나: (보고 줄, "표지음 둘"인가)."""
+    info = align_session(hs_io.read_session(hs_io.session_folder(data, name)), recordings)
+    hs_io.write_json(os.path.join(hs_io.processed_folder(data, name), "align.json"), info)
+    return report(info), info["method"] == "two"
 
 
 def main():
@@ -242,15 +376,18 @@ def main():
             recordings.append(hs_io.read_recording(folder))
         except (OSError, KeyError, ValueError) as e:
             print(f"워치 {os.path.basename(folder)}: 못 읽음({e})")
+            continue
+        step = wall_step_ms(recordings[-1])
+        if step is not None and abs(step) > WALL_STEP_NOTE_MS:
+            print(f"워치 {recordings[-1].name}: 녹음 중 벽시계 계단 {step:+.1f} ms(start·stop 부팅 시각 차)")
     missing = 0
     for name, why in hs_io.chosen(args.data, args.sessions):
         if why:
             print(f"{name}: 건너뜀({why})")
             continue
-        info = align_session(hs_io.read_session(hs_io.session_folder(args.data, name)), recordings)
-        hs_io.write_json(os.path.join(hs_io.processed_folder(args.data, name), "align.json"), info)
-        print("\n".join(report(info)))
-        missing += info["method"] != "two"
+        lines, two = hs_io.guarded(name, run, args.data, name, recordings)
+        print("\n".join(lines))
+        missing += not two
     return 1 if missing else 0
 
 

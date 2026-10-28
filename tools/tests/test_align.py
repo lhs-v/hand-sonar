@@ -6,6 +6,7 @@ import wave
 
 import align  # 사용자 설치 numpy 경로도 여기서 붙는다
 import hs_io
+import markers
 
 import numpy as np  # noqa: E402
 
@@ -49,21 +50,37 @@ def clock_rows(first_ns, n_frames, jitter_ns, rng, start_pos=0):
     return rows
 
 
-def make_data(root, rng):
+def click_burst(n, at, amplitude):
+    """넓은 띠 딸깍(손톱으로 두드린 소리 같은 것): 프레임 at부터 2 ms 동안 줄어드는 흰 잡음."""
+    k = np.arange(96)
+    burst = np.random.default_rng(11).normal(0, 1, 96) * np.exp(-k / 24) * amplitude
+    x = np.zeros(n)
+    x[at: at + 96] = burst[: max(0, min(96, n - at))]
+    return x
+
+
+def make_data(root, rng, wall_error_ms=WALL_ERROR_MS, test_before_sec=2.0, heard=("start", "end"), bursts=()):
+    """합성 워치 녹음과 폰 세션. wall_error_ms: 워치 벽시계가 앞선 정도, test_before_sec: 준비 화면 "표지음 시험"이 시작 표지음보다
+    앞선 초(None이면 없음), heard: 워치 녹음에 든 세션 표지음, bursts: 더 넣을 넓은 띠 딸깍 [(시작 표지음 기준 초, 세기)]."""
     n_watch = 30 * RATE
     s1 = (watch_ns_of_phone(P_START) - WATCH_START_NS) / 1e9 * RATE  # 시작 표지음이 워치 녹음에서 시작하는 소수 프레임
     s2 = (watch_ns_of_phone(P_END) - WATCH_START_NS) / 1e9 * RATE
     x = watch_chirp(n_watch, 3_000.0) + rng.normal(0, 30.0, n_watch)
-    for start in (s1, s2, s1 - 2.0 * RATE):  # 시작·끝 표지음과, 2 s 앞 준비 화면의 "표지음 시험"
+    sounds = [s for key, s in (("start", s1), ("end", s2)) if key in heard]
+    if test_before_sec is not None:
+        sounds.append(s1 - test_before_sec * RATE)  # 준비 화면의 "표지음 시험"
+    for start in sounds:
         x += marker_at(n_watch, start, 300.0)
     click = int(s1 - 0.3 * RATE)  # 시작 버튼 소리 같은 잡음(시작 표지음 0.3 s 앞)
     x[click] += 20_000.0
+    for at_sec, amplitude in bursts:
+        x += click_burst(n_watch, int(s1 + at_sec * RATE), amplitude)
     folder = os.path.join(root, "watch", "recordings", "20990101-000000")
     os.makedirs(folder)
     half = n_watch // 2
     write_wav(os.path.join(folder, "part-000.wav"), x[:half])
     write_wav(os.path.join(folder, "part-001.wav"), x[half:])
-    watch_wall0 = 1_000_000_000.0 + (WATCH_START_NS - W0) / (1 + PPM) / 1e6 + WALL_ERROR_MS  # 녹음 시작 순간의 워치 벽시계
+    watch_wall0 = 1_000_000_000.0 + (WATCH_START_NS - W0) / (1 + PPM) / 1e6 + wall_error_ms  # 녹음 시작 순간의 워치 벽시계
     rec = {
         "format": 1, "app": "0.1.0", "device": "test", "android": "16",
         "start": {"wallMs": int(watch_wall0), "elapsedNs": WATCH_START_NS},
@@ -121,6 +138,43 @@ class AlignTest(unittest.TestCase):
             error_ms = np.abs(a.phone_ns(frames) - phone_ns_of_watch_frame(frames)) / 1e6
             self.assertLess(float(error_ms.max()), 0.1, f"최대 오차 {error_ms.max():.4f} ms")
             self.assertAlmostEqual(-WALL_ERROR_MS, info["wallDiffMs"]["start"], delta=5.0)  # 워치 벽시계가 앞서면 시스템 시각 맞춤이 그만큼 늦다
+
+    def test_wall_clock_seconds_off_with_marker_test_before_start(self):
+        # 워치 벽시계가 3–4 s 앞서고 표지음 시험이 시작 2–4 s 앞에 있어도(실데이터 234828: 4.07 s, 3.66 s) 틀린 "하나"가 되지 않는다.
+        # 끝 표지음보다 센 딸깍이 끝 창(±0.5 s)에 있어도 짝을 놓치지 않는다.
+        for wall_ms, test_sec in ((3_000, 2.0), (4_070, 3.66)):
+            with tempfile.TemporaryDirectory() as root:
+                folder, session_folder, s1, s2 = make_data(root, np.random.default_rng(3), wall_error_ms=wall_ms, test_before_sec=test_sec,
+                                                           bursts=[(20.2, 30_000.0)])
+                recording = hs_io.read_recording(folder)
+                info = align.align_session(hs_io.read_session(session_folder), [recording])
+                self.assertEqual("two", info["method"], (wall_ms, info["notes"]))
+                self.assertAlmostEqual(s1, info["watch"]["start"]["frame"], delta=0.1e-3 * RATE)
+                self.assertAlmostEqual(s2, info["watch"]["end"]["frame"], delta=0.1e-3 * RATE)
+                self.assertAlmostEqual(-wall_ms, info["wallDiffMs"]["start"], delta=5.0)
+
+    def test_single_marker_is_never_the_marker_test(self):
+        # 워치가 끝 표지음을 못 들었을 때(취소한 세션처럼) 표지음 하나로 맞추면 표지음 시험이 아니라 시작 표지음이거나, 아니면 없음.
+        for wall_ms, test_sec in ((1_200, 2.0), (3_000, 2.0), (4_070, 3.66)):
+            with tempfile.TemporaryDirectory() as root:
+                folder, session_folder, s1, _ = make_data(root, np.random.default_rng(3), wall_error_ms=wall_ms, test_before_sec=test_sec,
+                                                          heard=("start",))
+                info = align.align_session(hs_io.read_session(session_folder), [hs_io.read_recording(folder)])
+                self.assertIn(info["method"], ("one", "none"), info["notes"])
+                if info["method"] == "one":
+                    self.assertAlmostEqual(s1, info["watch"]["start"]["frame"], delta=0.1e-3 * RATE, msg=(wall_ms, info["notes"]))
+
+    def test_broadband_click_alone_is_not_a_marker(self):
+        # 워치가 표지음을 하나도 못 들었고 시작 창에 넓은 띠 딸깍만 있으면 "표지음 하나"로 고르지 않는다.
+        with tempfile.TemporaryDirectory() as root:
+            folder, session_folder, s1, _ = make_data(root, np.random.default_rng(3), test_before_sec=None, heard=(),
+                                                      bursts=[(0.1, 30_000.0)])
+            recording = hs_io.read_recording(folder)
+            at = s1 + 0.1 * RATE - markers.SAMPLES / 2  # 정합 필터는 형판 가운데(봉우리)를 딸깍에 맞춘 자리를 표지음 시작으로 잡는다
+            clicks = [f for f, r in align.search(recording, s1, 1.0, 5) if abs(f - at) < 0.005 * RATE]
+            self.assertTrue(clicks, "딸깍이 표지음 후보(비 ≥ 8)로 잡혀야 이 시험이 뜻이 있다")
+            info = align.align_session(hs_io.read_session(session_folder), [recording])
+            self.assertEqual("none", info["method"], info["notes"])
 
 
 if __name__ == "__main__":
