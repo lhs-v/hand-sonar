@@ -67,6 +67,7 @@ fun RecordsScreen(ui: UiState, c: SessionController, inbox: InboxStatus, export:
             }
         }
         WatchInboxLine(inbox)
+        if (export.busy) WarningText("내보내는 중에는 앱을 닫지 마세요(화면은 켜 둡니다). 닫으면 끊겨 처음부터 다시 해야 합니다")
         export.message?.let { if (export.error) WarningText(it) else Text(it, style = MaterialTheme.typography.titleMedium) }
         ui.error?.let { WarningText(it) }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -107,9 +108,11 @@ fun RecordsScreen(ui: UiState, c: SessionController, inbox: InboxStatus, export:
             dismissButton = { TextButton(onClick = { askExport = false }) { Text("그만두기") } },
             title = { Text("내보내기") },
             text = {
+                val last = export.lastZip?.let { "지난번: $it (${dateTime(export.lastMs)}). " } ?: "아직 내보낸 적이 없습니다. "
                 Text(
                     "보관한 세션과 받은 워치 녹음을 Download/HandSonar/ 아래 zip 하나로 저장합니다. PC의 hand-sonar-data에 그대로 풀면 됩니다. " +
-                        "'새 것만'은 지난번 내보낸 뒤 파일 수·크기·시각이 그대로인 폴더를 뺍니다.",
+                        "'새 것만'은 지난번 내보낸 뒤 파일 수·크기·시각이 그대로인 폴더를 뺍니다. " + last +
+                        "지난번 zip을 PC로 옮긴 뒤에만 '새 것만'을 쓰세요(아니면 '전부').",
                 )
             },
         )
