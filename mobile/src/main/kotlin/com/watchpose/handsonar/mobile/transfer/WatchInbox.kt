@@ -35,7 +35,8 @@ data class InboxStatus(val received: Int = 0, val lastMs: Long = 0L, val receivi
  * 다 받은 녹음 이름은 앱 내부 저장소의 [NameLog]에 적는다(녹음 폴더에 표시 파일을 두지 않아 PC로 받는 모양이 워치와 같다).
  * [WatchReceiverService]의 콜백이 그 서비스의 작업 스레드에서 부르고, 화면은 [status]만 본다.
  * 한 번에 파일 하나만 받는다(워치가 하나씩 보낸다): 새 채널이 [begin]하면 앞 채널의 늦은 사건([finish]·[abandon])은
- * 채널 객체(`token`, 토큰·노드·경로로 견준다)가 달라 무시한다.
+ * 채널 객체(`token`, 토큰·노드·경로로 견준다)가 달라 무시한다. 받는 동안 앱 프로세스가 다시 떠 받는 중인 채널을 모르면
+ * [finish]는 경로로 `.part`를 찾아 확인한다.
  */
 class WatchInbox(context: Context) {
     val root: File = File(context.getExternalFilesDir(null) ?: context.filesDir, ROOT).apply { mkdirs() }
@@ -47,7 +48,7 @@ class WatchInbox(context: Context) {
     val status: StateFlow<InboxStatus> = mutable.asStateFlow()
 
     /** 받는 중인 채널 하나. */
-    private class Active(val token: Any, val ref: FileRef, val part: File)
+    private class Active(val token: Any, val part: File)
 
     private var active: Active? = null
     private var ticker: Job? = null
@@ -92,7 +93,7 @@ class WatchInbox(context: Context) {
             dir.mkdirs()
             val part = File(dir, ref.file + PART)
             part.delete()
-            active = Active(token, ref, part)
+            active = Active(token, part)
             val filesLeft = left[ref.recording]?.size?.takeIf { it > 0 } ?: 1
             mutable.update { it.copy(receiving = Receiving(ref.recording, ref.file, 0L, ref.size, filesLeft)) }
             ticker?.cancel()
@@ -112,36 +113,41 @@ class WatchInbox(context: Context) {
 
     /**
      * 입력이 닫혔다: 받은 `.part`를 확인해 맞으면 원래 이름으로 바꾸고 CODE_OK, 아니면 `.part`를 지우고 그 까닭의 코드.
-     * [token]이 받는 중인 채널이 아니면 null(앞 채널의 늦은 사건). 마지막 쓰기가 늦게 닿을 수 있어 크기가 모자라면 2 s까지 다시 잰다.
+     * 다른 채널이 받는 중이면 null(앞 채널의 늦은 사건). 받는 중인 채널이 없으면(받는 동안 앱 프로세스가 다시 떴다 — receiveFile은
+     * Play 서비스가 쓰므로 그사이에도 이어진다) 경로([ref])로 `.part`를 찾아 확인한다.
+     * 마지막 쓰기가 늦게 닿을 수 있어 크기가 모자라면 2 s까지 다시 잰다.
      */
-    fun finish(token: Any): Int? {
-        val a = synchronized(lock) { active?.takeIf { it.token == token } } ?: return null
+    fun finish(ref: FileRef, token: Any): Int? {
+        val part = synchronized(lock) {
+            val a = active
+            when {
+                a == null -> File(File(root, ref.recording), ref.file + PART)
+                a.token == token -> a.part
+                else -> return null
+            }
+        }
         var waited = 0L
-        while (a.part.length() < a.ref.size && waited < SETTLE_MS) {
+        while (part.length() < ref.size && waited < SETTLE_MS) {
             Thread.sleep(SETTLE_STEP_MS)
             waited += SETTLE_STEP_MS
         }
         synchronized(lock) {
-            if (active?.token != token) return null
-            val size = if (a.part.isFile) a.part.length() else -1L
-            var code = TransferRules.verify(a.ref.file, size, a.ref.size, TransferRules.readHeader(a.part))
+            val a = active
+            if (a != null && a.token != token) return null
+            val size = if (part.isFile) part.length() else -1L
+            var code = TransferRules.verify(ref.file, size, ref.size, TransferRules.readHeader(part))
             if (code == TransferProtocol.CODE_OK) {
                 code = try {
-                    Files.move(
-                        a.part.toPath(),
-                        File(a.part.parentFile, a.ref.file).toPath(),
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.ATOMIC_MOVE,
-                    )
-                    left[a.ref.recording]?.remove(a.ref.file)
+                    Files.move(part.toPath(), File(part.parentFile, ref.file).toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+                    left[ref.recording]?.remove(ref.file)
                     TransferProtocol.CODE_OK
                 } catch (e: IOException) {
-                    Log.w(TAG, "이름을 못 바꿈: ${a.part}", e)
+                    Log.w(TAG, "이름을 못 바꿈: $part", e)
                     TransferProtocol.CODE_IO
                 }
             }
-            if (code != TransferProtocol.CODE_OK) a.part.delete()
-            clearActive()
+            if (code != TransferProtocol.CODE_OK) part.delete()
+            if (a != null) clearActive()
             return code
         }
     }

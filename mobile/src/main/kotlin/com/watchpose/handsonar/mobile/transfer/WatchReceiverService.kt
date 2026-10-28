@@ -45,7 +45,8 @@ class WatchReceiverService : WearableListenerService() {
     }
 
     override fun onInputClosed(channel: ChannelClient.Channel, closeReason: Int, appSpecificErrorCode: Int) {
-        val code = inbox.finish(channel) ?: return
+        val ref = TransferProtocol.parseChannelPath(channel.path) ?: return
+        val code = inbox.finish(ref, channel) ?: return
         channels.close(channel, code)
     }
 
