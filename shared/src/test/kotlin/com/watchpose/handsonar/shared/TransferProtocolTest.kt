@@ -12,6 +12,16 @@ class TransferProtocolTest {
         assertEquals("/hand-sonar/rec/20261028-101500/part-003.wav/5760044", path)
         assertEquals(FileRef("20261028-101500", "part-003.wav", 5_760_044), TransferProtocol.parseChannelPath(path))
         assertEquals(FileRef("20261028-101500-2", "rec.json", 0), TransferProtocol.parseChannelPath("/hand-sonar/rec/20261028-101500-2/rec.json/0"))
+        assertEquals(FileRef("20261028-101500", "imu-000.csv", 7), TransferProtocol.parseChannelPath("/hand-sonar/rec/20261028-101500/imu-000.csv/7"))
+    }
+
+    @Test
+    fun onlyRejectionsAboutTheFileItselfArePermanent() {
+        // 다시 보내도 같은 답이 나오는 거절(머리말 모양·이름)만 그 녹음을 막는다. 끊김·크기·쓰기 실패는 다시 해 볼 일이다
+        assertEquals(
+            listOf(TransferProtocol.CODE_BAD_WAV, TransferProtocol.CODE_BAD_PATH),
+            (0..9).filter { TransferProtocol.isPermanent(it) },
+        )
     }
 
     @Test
@@ -22,7 +32,8 @@ class TransferProtocolTest {
             "/hand-sonar/rec/20261028-101500/part-003.wav/12/x",
             "/hand-sonar/rec/../part-003.wav/12",
             "/hand-sonar/rec/20261028-101500/../rec.json/12",
-            "/hand-sonar/rec/20261028-101500/notes.txt/12",
+            "/hand-sonar/rec/20261028-101500/.hidden/12",
+            "/hand-sonar/rec/20261028-101500/a b.wav/12",
             "/hand-sonar/rec/20261028-101500/rec.json.tmp/12",
             "/hand-sonar/rec/20261028-101500/part-003.wav.part/12",
             "/hand-sonar/rec/20261028-101500/part-003.wav/-1",

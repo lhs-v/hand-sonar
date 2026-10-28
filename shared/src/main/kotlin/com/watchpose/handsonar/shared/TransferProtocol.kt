@@ -20,7 +20,8 @@ data class FileRef(val recording: String, val file: String, val size: Long)
  * 4. 다 보낸 뒤 같은 목록 요청을 한 번 더 보낸다. 빈 답이 그 녹음을 다 받았다는 폰의 확인이고, 워치는 그때 그 녹음을 "보냄"으로 적는다.
  *
  * 채널 경로 끝에 크기를 붙이는 까닭: 폰은 채널 하나만 보고도(목록 요청 뒤에 앱이 다시 떴어도) 받은 크기를 견줄 수 있다.
- * 이름은 규칙으로 걸러 받는 쪽 폴더 밖으로 나가지 못하게 한다(`..`, `/`).
+ * 파일 이름은 정해 둔 목록이 아니라 [TransferRules.isSendable]의 규칙으로 거른다: 녹음 폴더에 새 종류의 파일이 생겨도 두 앱을 고치지
+ * 않아도 되고, 받는 쪽 폴더 밖으로 나가는 이름(`..`, `/`)은 막힌다.
  */
 object TransferProtocol {
     const val CAPABILITY = "hand_sonar_phone"
@@ -66,7 +67,7 @@ object TransferProtocol {
     /** `/hand-sonar/rec/<녹음>/<파일>/<바이트 수>`. 이름이 규칙에 맞지 않거나 크기가 범위 밖이면 IllegalArgumentException. */
     fun channelPath(recording: String, file: String, size: Long): String {
         require(isRecordingName(recording)) { "녹음 이름이 아님: $recording" }
-        require(TransferRules.isTransferable(file)) { "보낼 파일 이름이 아님: $file" }
+        require(TransferRules.isSendable(file)) { "보낼 파일 이름이 아님: $file" }
         require(size in 0..MAX_FILE_BYTES) { "크기가 범위 밖: $size" }
         return "$CHANNEL_PREFIX$recording/$file/$size"
     }
@@ -77,7 +78,7 @@ object TransferProtocol {
         val parts = path.substring(CHANNEL_PREFIX.length).split('/')
         if (parts.size != 3) return null
         val size = sizeOf(parts[2]) ?: return null
-        if (!isRecordingName(parts[0]) || !TransferRules.isTransferable(parts[1])) return null
+        if (!isRecordingName(parts[0]) || !TransferRules.isSendable(parts[1])) return null
         return FileRef(parts[0], parts[1], size)
     }
 
@@ -97,7 +98,7 @@ object TransferProtocol {
             if (cut <= 0) return null
             val name = line.substring(0, cut)
             val size = sizeOf(line.substring(cut + 1)) ?: return null
-            if (!TransferRules.isTransferable(name)) return null
+            if (!TransferRules.isSendable(name)) return null
             RecFile(name, size)
         }
         if (files.distinctBy { it.name }.size != files.size) return null
@@ -115,9 +116,15 @@ object TransferProtocol {
         val lines = lines(bytes) ?: return null
         if (lines.isEmpty() || lines[0] != NEED_HEAD) return null
         val names = lines.drop(1)
-        if (names.any { !TransferRules.isTransferable(it) } || names.toSet().size != names.size) return null
+        if (names.any { !TransferRules.isSendable(it) } || names.toSet().size != names.size) return null
         return names
     }
+
+    /**
+     * 다시 보내도 같은 답이 나올 거절인가: 받은 파일의 WAV 머리말 모양이 틀림, 경로(이름)를 못 읽음. 보내는 쪽은 그 녹음을 막고 알린다.
+     * 끊김·받은 크기 다름·폰의 쓰기 실패는 다시 해 볼 일이다.
+     */
+    fun isPermanent(code: Int): Boolean = code == CODE_BAD_WAV || code == CODE_BAD_PATH
 
     /** 결과 코드를 화면용 짧은 글로. */
     fun describe(code: Int): String = when (code) {

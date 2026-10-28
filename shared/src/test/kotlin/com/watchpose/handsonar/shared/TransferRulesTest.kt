@@ -5,10 +5,12 @@ import java.io.RandomAccessFile
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class TransferRulesTest {
     @Test
-    fun sendsPartsInNumberOrderThenRecJsonAndSkipsLeftovers() {
+    fun sendsEveryRegularFilePartsFirstAndRecJsonLastButNoLeftovers() {
         val files = listOf(
             RecFile("rec.json", 900),
             RecFile("part-010.wav", 44),
@@ -17,18 +19,38 @@ class TransferRulesTest {
             RecFile("part-001.wav.part", 10),
             RecFile("part-1000.wav", 44),
             RecFile("notes.txt", 3),
+            RecFile("imu-000.csv", 7), // 다음 기능의 센서 기록처럼 녹음 폴더에 더 생기는 파일도 보낸다
         )
-        assertEquals(listOf("part-002.wav", "part-010.wav", "part-1000.wav", "rec.json"), TransferRules.transferable(files).map { it.name })
+        assertEquals(
+            listOf("part-002.wav", "part-010.wav", "part-1000.wav", "imu-000.csv", "notes.txt", "rec.json"),
+            TransferRules.transferable(files).map { it.name },
+        )
+        assertEquals(emptyList(), TransferRules.unsendable(files))
     }
 
     @Test
-    fun pendingIsOldestFirstWithoutSentOrLiveRecordings() {
+    fun unsafeNamesAreReportedInsteadOfDroppedSilently() {
+        val files = listOf(RecFile("rec.json", 1), RecFile("bad name.txt", 1), RecFile(".hidden", 1), RecFile("한글.csv", 1), RecFile("x.tmp", 1), RecFile("y.part", 1))
+        assertEquals(listOf("bad name.txt", ".hidden", "한글.csv"), TransferRules.unsendable(files))
+        assertEquals(listOf("rec.json"), TransferRules.transferable(files).map { it.name })
+        assertTrue(TransferRules.isSendable("sensors-000.csv"))
+        assertFalse(TransferRules.isSendable("a".repeat(101)))
+        assertFalse(TransferRules.isSendable("rec.json.tmp"))
+        assertTrue(TransferRules.isLeftover("part-003.wav.part"))
+    }
+
+    @Test
+    fun pendingIsNewestFirstWithoutSentOrLiveRecordings() {
+        // 새로 깐 뒤에는 밀린 녹음이 모두 보낼 목록에 들므로, 방금 녹음한 것이 먼저 가게 새것부터 보낸다
         val folders = listOf("20261028-101500-2", "20261028-120000", "20261027-235407", "20261028-090000", "tmp", "20261028")
         assertEquals(
-            listOf("20261027-235407", "20261028-101500-2"),
+            listOf("20261028-101500-2", "20261027-235407"),
             TransferRules.pending(folders, sent = setOf("20261028-090000"), live = "20261028-120000"),
         )
-        assertEquals(4, TransferRules.pending(folders, sent = emptySet(), live = null).size)
+        assertEquals(
+            listOf("20261028-120000", "20261028-101500-2", "20261028-090000", "20261027-235407"),
+            TransferRules.pending(folders, sent = emptySet(), live = null),
+        )
     }
 
     @Test

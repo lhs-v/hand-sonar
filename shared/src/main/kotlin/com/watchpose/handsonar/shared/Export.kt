@@ -31,8 +31,8 @@ object ExportRules {
     const val RECORDINGS = "watch/recordings"
     private val STAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
 
-    /** zip에 넣을 파일인가: 받는 중인 `.part`, 쓰다 남은 `.tmp`는 넣지 않는다. */
-    fun includes(name: String): Boolean = !name.endsWith(".part") && !name.endsWith(".tmp")
+    /** zip에 넣을 파일인가: 받는 중인 `.part`, 쓰다 남은 `.tmp`는 넣지 않는다([TransferRules.isLeftover]). */
+    fun includes(name: String): Boolean = !TransferRules.isLeftover(name)
 
     /** [dir]의 파일(하위 폴더는 없다)을 이름 순으로 읽어 `[parent]/<폴더 이름>` 앞머리의 폴더로. */
     fun folder(parent: String, dir: File): ExportFolder = ExportFolder(

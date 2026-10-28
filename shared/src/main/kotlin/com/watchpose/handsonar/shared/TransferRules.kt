@@ -12,19 +12,36 @@ object TransferRules {
     const val REC_JSON = "rec.json"
     private val PART = Regex("""part-(\d{3,})\.wav""")
 
-    /** 폰으로 보낼 파일 이름인가: `rec.json`과 `part-NNN.wav`. 쓰다 남은 `rec.json.tmp`, 받는 중인 `.part`는 아니다. */
-    fun isTransferable(name: String): Boolean = name == REC_JSON || PART.matches(name)
+    /** 기기 사이를 오가도 되는 파일 이름: 영문·숫자로 시작하고 영문·숫자·`.`·`_`·`-`만, 100자까지. 경로 구분자·`..`·숨김 파일이 될 수 없다. */
+    private val SAFE_NAME = Regex("""[A-Za-z0-9][A-Za-z0-9._-]{0,99}""")
+
+    /** 쓰다 남은(`.tmp`, 예: `rec.json.tmp`)·받는 중인(`.part`) 파일. 보내지도, 내보내지도, PC로 받지도 않는다. */
+    fun isLeftover(name: String): Boolean = name.endsWith(".tmp") || name.endsWith(".part")
 
     /**
-     * 녹음 폴더의 파일 중 보낼 것과 그 차례: 조각을 번호 순으로 먼저, `rec.json`을 마지막에.
-     * PC 도구는 `rec.json`이 있는 폴더만 녹음으로 보므로(`hs_io.recording_folders`) 도중에 끊긴 사본이 녹음으로 잡히지 않는다.
+     * 폰으로 보낼 수 있는 파일 이름인가: 남은 파일이 아니고 이름이 안전하다. 이름 목록을 정해 두지 않는다 — 녹음 폴더의 일반 파일은
+     * (`part-NNN.wav`, `rec.json`, 앞으로 더해질 센서 기록 등) 모두 보낸다.
+     */
+    fun isSendable(name: String): Boolean = SAFE_NAME.matches(name) && !isLeftover(name)
+
+    /**
+     * 녹음 폴더의 일반 파일 중 보낼 것과 그 차례: 조각(번호 순) → 다른 파일(이름 순) → `rec.json`. 남은 파일과 이름이 안전하지 않은 파일은 뺀다
+     * (안전하지 않은 이름은 [unsendable]로 따로 보고 그 녹음을 막는다). PC 도구는 `rec.json`이 있는 폴더만 녹음으로 보므로
+     * (`hs_io.recording_folders`) 도중에 끊긴 사본이 녹음으로 잡히지 않는다.
      */
     fun transferable(files: List<RecFile>): List<RecFile> =
-        files.filter { isTransferable(it.name) }.sortedWith(compareBy<RecFile>({ it.name == REC_JSON }, { partNumber(it.name) }))
+        files.filter { isSendable(it.name) }.sortedWith(compareBy<RecFile>({ it.name == REC_JSON }, { partNumber(it.name) }, { it.name }))
 
-    /** 보낼 녹음(오래된 것부터): 녹음 이름 규칙에 맞고, 아직 "보냄"이 아니고([sent]), 지금 녹음 중인 폴더([live])가 아닌 것. */
+    /** 남은 파일이 아닌데 이름이 안전하지 않아 보낼 수 없는 파일. 말없이 빼면 폰 사본이 모자라므로 보내는 쪽이 그 녹음을 막고 알린다. */
+    fun unsendable(files: List<RecFile>): List<String> = files.map { it.name }.filter { !isLeftover(it) && !SAFE_NAME.matches(it) }
+
+    /**
+     * 보낼 녹음(새것부터): 녹음 이름 규칙에 맞고, 아직 "보냄"이 아니고([sent]), 지금 녹음 중인 폴더([live])가 아닌 것.
+     * 새것부터 보내는 까닭: 앱을 처음 깔면 워치에 쌓인 녹음이 모두 목록에 드는데, 방금 녹음한 세션이 그 뒤에 서면 몇 시간 늦는다.
+     * 밀린 녹음은 녹음과 녹음 사이에 마저 간다.
+     */
     fun pending(folders: Collection<String>, sent: Set<String>, live: String?): List<String> =
-        folders.filter { TransferProtocol.isRecordingName(it) && it !in sent && it != live }.sorted()
+        folders.filter { TransferProtocol.isRecordingName(it) && it !in sent && it != live }.sortedDescending()
 
     /** [offer]의 파일 중 [local](폰의 이름 → 크기)에 없거나 크기가 다른 것의 이름(목록 차례 그대로). 비면 그 녹음을 다 받은 것이다. */
     fun missing(offer: List<RecFile>, local: Map<String, Long>): List<String> =
@@ -47,7 +64,8 @@ object TransferRules {
         }
     }
 
-    private fun partNumber(name: String): Long = PART.matchEntire(name)?.groupValues?.get(1)?.toLongOrNull() ?: -1L
+    /** 조각의 번호. 조각이 아니면 가장 큰 값이라 조각들 뒤에 선다. */
+    private fun partNumber(name: String): Long = PART.matchEntire(name)?.groupValues?.get(1)?.toLongOrNull() ?: Long.MAX_VALUE
 }
 
 /**
