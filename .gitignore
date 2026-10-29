@@ -33,6 +33,9 @@ mobile/src/main/assets/hand_landmarker.task
 *.npy
 *.npz
 *.png
+# 예외: data/의 데이터 묶음(export_data.py — 에코 프로파일만, 영상·원본 소리 없음)
+!data/sessions/*/echo.npz
+!data/recordings/*/echo.npz
 
 # 학습한 모델도 저장소 밖 hand-sonar-data/processed/training에 둔다
 *.pt

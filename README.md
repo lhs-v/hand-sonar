@@ -2,6 +2,8 @@
 
 갤럭시 워치의 스피커와 마이크로 18–21 kHz 초음파 소나를 녹음하고, 폰 정면 카메라로 손 관절 정답을 함께 모으는 안드로이드 앱 두 개입니다. 손 관절 추적 논문 WatchHand([arXiv 2602.21610](https://arxiv.org/abs/2602.21610))를 따라 해 보는 개인 연구용이며, 논문 저자와는 관계가 없습니다.
 
+**연구 현황(실험·처리·학습·분석 방식, 결과, 알아낸 것, 다음 할 일): [docs/research-status.md](docs/research-status.md).** 모은 데이터(관절과 에코 프로파일, 영상·원본 소리 제외)는 [data/](data/README.md)에 있습니다.
+
 ## 구성
 
 | 폴더 | 내용 |
@@ -9,7 +11,8 @@
 | `wear/` | 워치 앱. 18–21 kHz 처프(600 샘플, 48 kHz)를 계속 내면서 마이크를 녹음합니다. 1분 조각 WAV와 기록(`rec.json`), 가속도·자이로·지자기·중력 기록(`sensors-NNN.csv`)을 남기고, 녹음이 멈추면 블루투스로 폰에 넘깁니다. |
 | `mobile/` | 폰 앱. 정면 카메라와 MediaPipe Hand Landmarker로 손 관절 21점을 프레임마다 적고(`landmarks.csv`), 같은 프레임을 영상(`video.mp4`)으로 남깁니다. 안내 동작(손가락 굽히기, ASL 숫자, 손목, 자유 동작)을 시간표대로 띄우고(`prompts.csv`), 세션 시작과 끝에 표지음을 냅니다. 폰 센서(`phone_sensors-NNN.csv`)와 세션 정보도 적습니다. 워치가 넘긴 녹음을 받아 두고, 기록 화면에서 zip으로 내보냅니다. |
 | `shared/` | 두 앱이 같이 쓰는 순수 Kotlin 코드입니다(처프·표지음 규격, 검출기, 파일 형식, 세션 진행). JVM 시험이 있습니다. |
-| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`). |
+| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`), 데이터 묶음 만들기·되돌리기(`export_data.py`·`unpack_data.py`). 실험 스크립트(`experiments/`: 공개 데이터를 우리 형식으로, 공개 모델 전이, 학습 방법 바꾸기)도 있습니다. |
+| `data/` | 모은 세션 10개의 손 관절과 에코 프로파일, 그것을 맞추는 기록(영상·원본 소리·센서 제외, [data/README.md](data/README.md)). |
 
 ## 두 기기 시간 맞추기
 
@@ -118,6 +121,6 @@ handsonar.keyPassword=android
 
 ## 데이터
 
-수집한 녹음과 영상(얼굴이 찍힘)은 이 저장소에 넣지 않습니다.
+수집한 영상(얼굴이 찍힘)과 원본 소리(방 안의 말소리가 함께 녹음됨)는 이 저장소에 넣지 않습니다. 대신 손 관절과 에코 프로파일(18–21 kHz만 거른 처리 신호), 그것을 맞추는 기록을 [data/](data/README.md)에 넣었습니다(`tools/export_data.py`가 만들고 `tools/unpack_data.py`로 학습 폴더로 되돌립니다).
 
 공개 WatchHand 데이터셋(Cornell eCommons)으로 학습하려는 경우의 영상–에코 프로파일 시간 맞추기, 검증, 관절 정답 만들기는 [docs/public-watchhand-data.md](docs/public-watchhand-data.md)에 있습니다.

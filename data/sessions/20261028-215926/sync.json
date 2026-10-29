@@ -1,0 +1,18 @@
+{
+ "format": 2,
+ "session": "20261028-215926",
+ "lagMs": 3.5827365873785886,
+ "peak": 0.30542471383668834,
+ "withinFrame": true,
+ "frameMs": 33.0,
+ "minPeak": 0.1,
+ "soundRowsUsed": 17503,
+ "cameraPairs": 4317,
+ "timeBase": "realtime",
+ "inputs": {
+  "align.json": "09d0e3327b92f031f5847724e9b930605e011f24e08c22d4d0b518fd372a0f22",
+  "rows.npz": "d603d312b38f499942e1c5f9b142ccdda567564f36ddb403ce5a68b390c757fc",
+  "landmarks.csv": "565d1fbfe2986cadff13b743e01e441e69fc3df2c609e27991fc7813a5d00270"
+ },
+ "usable": true
+}
