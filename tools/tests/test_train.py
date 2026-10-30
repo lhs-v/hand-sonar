@@ -43,6 +43,71 @@ class VelocityLossTest(unittest.TestCase):
             np.testing.assert_array_equal(np.diff(t[idx])[pair], 50_000_000)  # 이웃 쌍은 늘 바로 다음 프레임
 
 
+class AugmentTest(unittest.TestCase):
+    def setUp(self):
+        self.segs = [np.arange(0, 150), np.arange(150, 260)]
+        self.rng_x = np.random.default_rng(3)
+
+    def offsets_of(self, aug, x_wide, i, out):
+        """증강 결과의 각 샘플이 넓은 창의 몇 번째 칸부터 자른 것인지(0 … 2·shift)."""
+        found = []
+        for k, frame in enumerate(i.tolist()):
+            hits = [o for o in range(2 * aug.shift + 1)
+                    if torch.allclose(out[k], train.standardize_t(x_wide[frame: frame + 1, :, :, o: o + 60])[0], atol=1e-5)]
+            self.assertEqual(1, len(hits))
+            found.append(hits[0])
+        return np.array(found)
+
+    def test_batch_pieces_draw_the_same_minibatches_as_batches(self):
+        a = train.batches(self.segs, np.random.default_rng(7))
+        b = train.batch_pieces(self.segs, np.random.default_rng(7))
+        self.assertEqual(len(a), len(b))
+        for (ia, pa), (ib, pb, lengths) in zip(a, b):
+            np.testing.assert_array_equal(ia, ib)
+            np.testing.assert_array_equal(pa, pb)
+            self.assertEqual(len(ib), sum(lengths))
+
+    def test_center_is_the_plain_window(self):
+        x_wide = torch.as_tensor(self.rng_x.normal(3.0, 2.0, (6, 2, 96, 70)), dtype=torch.float32)
+        center = train.Augment(x_wide, 5, False).center()
+        want = train.dataset.standardize(x_wide.numpy()[:, :, :, 5:65].astype(np.float64))
+        np.testing.assert_allclose(center.numpy(), want, atol=1e-5)
+
+    def test_shift_moves_whole_chunks_and_untouched_chunks_stay_centered(self):
+        x_wide = torch.as_tensor(self.rng_x.normal(0.0, 1.0, (260, 2, 96, 70)), dtype=torch.float32)
+        aug = train.Augment(x_wide, 5, False)
+        rng = np.random.default_rng(11)
+        seen = []
+        for idx, _, lengths in train.batch_pieces(self.segs, rng):
+            i = torch.as_tensor(idx)
+            offs = self.offsets_of(aug, x_wide, i, aug.batch(i, lengths, rng))
+            for chunk in np.split(offs, np.cumsum(lengths)[:-1]):
+                self.assertEqual(1, len(set(chunk.tolist())))  # 한 묶음은 같은 이동
+                seen.append(int(chunk[0]))
+        self.assertIn(5, seen)  # 증강하지 않은 묶음은 가운데
+        self.assertTrue(any(o != 5 for o in seen))
+        self.assertTrue(all(0 <= o <= 10 for o in seen))
+
+    def test_mask_hides_paper_sized_bands(self):
+        x = torch.as_tensor(self.rng_x.normal(0.0, 1.0, (260, 2, 96, 60)), dtype=torch.float32)
+        aug = train.Augment(x, 0, True)
+        rng = np.random.default_rng(5)
+        hidden_any = False
+        for idx, _, lengths in train.batch_pieces(self.segs, rng):
+            out = aug.batch(torch.as_tensor(idx), lengths, rng)
+            zero = (out == 0).all(dim=1)  # (B, 96, 60): 두 채널 모두 0
+            rows = zero.all(dim=2).sum(dim=1).numpy()  # 시간 띠(모든 칸이 0인 줄)
+            cols = zero.all(dim=1).sum(dim=1).numpy()  # 거리 띠
+            for r, c in zip(rows, cols):
+                self.assertTrue(r == 0 or 5 <= r <= 15, r)
+                self.assertTrue(c == 0 or 5 <= c <= 10, c)
+                self.assertEqual(r == 0, c == 0)  # 시간·거리 띠를 함께 가린다
+                hidden_any |= bool(r)
+            untouched = rows == 0
+            np.testing.assert_array_equal(out[torch.as_tensor(untouched)].numpy(), x[torch.as_tensor(idx[untouched])].numpy())
+        self.assertTrue(hidden_any)
+
+
 class FitTest(unittest.TestCase):
     def test_non_finite_loss_stops_with_a_reason(self):
         x = torch.full((8, 2, 96, 60), float("nan"))  # 첫 epoch부터 손실이 nan

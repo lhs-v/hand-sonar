@@ -1,7 +1,8 @@
 """FastViT-T12로 에코 창에서 손 관절 20점을 회귀하고 평가한다(손 소나 계획 4, 학습 설계 §4·§5).
 
     python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 100]
-                             [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--save-x] [세션 …]
+                             [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--shift 5] [--mask] [--save-x]
+                             [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
   report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다. dataset.npz는 기본으로 창 x 없이 row·목표·라벨·입력 지문만 쓴다(--save-x면 창도).
@@ -9,6 +10,12 @@
 - 손실: MSE(60값) + 0.1 × 속도 손실. 속도 손실은 묶음 안 이웃 프레임의 예측 차분과 정답 차분의 MSE다(예측 움직임 자체는 벌하지
   않는다 — 평균 쏠림을 키우지 않게). 미니배치는 연속 프레임 32개 묶음 여럿(모두 256프레임 안팎)이다. 덩어리(세션이 같고 이웃 프레임
   간격이 0.2 s 안)마다 묶음 시작을 epoch마다 무작위로 밀고, 묶음 순서를 섞는다.
+- 증강(--shift·--mask, 논문 §3.6.4, 2026-10-30): 학습 미니배치에만 건다. 묶음(연속 32프레임)마다 절반 확률로 증강하고, 증강한 묶음은
+  거리 축으로 −shift…+shift칸 무작위 이동(창을 칸 300−shift…359+shift로 넓게 만들어 두고 60칸을 잘라 창마다 다시 표준화 — 빈자리를 0이 아닌
+  실제 이웃 칸으로 채운다. 논문은 ±5칸 ≈ 1.8 cm로, 워치를 찬 위치가 바뀌는 것을 흉내 냈다)과, 80% 확률로 시간 5–15줄·거리 5–10칸 구간
+  가리기(표준화 뒤 0)를 한다. 한 묶음은 같은 이동·가리기를 쓴다(1.2 s 동안 착용 위치는 그대로이고, 속도 손실이 이웃 프레임을 견준다). 논문의
+  진폭 0.95–1.05배는 창마다 표준화하므로 효과가 없어 넣지 않았다. 검증·평가는 가운데 60칸(증강 없음)이라 증강 없는 학습과 입력이 같다.
+  증강을 끄면 난수 소비가 예전과 같아 같은 명령이 같은 숫자를 낸다.
 - 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs
   (100)와 벽시계 상한 --max-minutes(20분, 그 epoch 뒤 멈춤)를 둔다. 학습·검증 손실이 nan·inf면 이유를 적고 끝 코드 1로 멈춘다.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
@@ -77,6 +84,10 @@ MODES = ("session", "blocks", "time", "overfit")
 KIND_COLORS = ("#2a9d8f", "#8a6fc4", "#c2548a", "#5b5a56", GRID)  # 동작 종류 넷(dataset.KINDS) + 라벨 없음(그림의 띠)
 ROLE_COLORS = (BASE, "#e3a33b", BLUE)  # 학습 · 검증 · 시험(그림의 띠, dataset.ROLES 순서)
 ROLE_NAMES = ("학습", "검증", "시험")
+AUG_FRACTION = 0.5  # 증강하는 묶음의 몫(논문: 원본은 그대로 두고 사본에 증강)
+MASK_PROB = 0.8  # 증강한 묶음에서 가리기를 할 확률(논문)
+MASK_ROWS = (5, 15)  # 가리는 시간 폭(줄, 논문)
+MASK_BINS = (5, 10)  # 가리는 거리 폭(칸, 논문)
 GAP_DRAW = 1.0  # 시험 블록을 이어 붙여 그릴 때 블록 사이를 비우는 s
 
 
@@ -106,6 +117,11 @@ def pairs_of(pieces):
 
 def batches(segs, rng, chunk=CHUNK, batch=BATCH):
     """한 epoch의 미니배치 [(프레임 번호, 이웃 쌍 표시)]. 덩어리마다 시작을 무작위로 밀어 chunk개씩 자르고, 묶음 순서를 섞어 고르게 나눈다."""
+    return [(idx, pair) for idx, pair, _ in batch_pieces(segs, rng, chunk, batch)]
+
+
+def batch_pieces(segs, rng, chunk=CHUNK, batch=BATCH):
+    """batches와 같은 미니배치에 묶음 길이 목록을 더한 [(프레임 번호, 이웃 쌍 표시, 묶음 길이들)](난수 소비도 같다)."""
     pieces = []
     for seg in segs:
         first = int(rng.integers(chunk)) if len(seg) > chunk else 0
@@ -115,8 +131,63 @@ def batches(segs, rng, chunk=CHUNK, batch=BATCH):
     out = []
     for group in np.array_split(order, count):
         chosen = [pieces[k] for k in group]
-        out.append((np.concatenate(chosen), pairs_of(chosen)))
+        out.append((np.concatenate(chosen), pairs_of(chosen), [len(p) for p in chosen]))
     return out
+
+
+def standardize_t(a):
+    """dataset.standardize의 torch 판: 마지막 두 축(줄 × 칸)마다 평균을 빼고 표준편차로 나눈다(0이면 1로)."""
+    mean = a.mean(dim=(-2, -1), keepdim=True)
+    std = a.std(dim=(-2, -1), keepdim=True, correction=0)
+    return (a - mean) / torch.where(std > 0, std, torch.ones_like(std))
+
+
+class Augment:
+    """학습 미니배치 증강(머리말). x는 shift > 0이면 칸 300−shift…359+shift의 표준화 전 창 (N, 2, 96, 60 + 2·shift),
+    0이면 보통 창 (N, 2, 96, 60)이다."""
+
+    def __init__(self, x, shift, mask):
+        self.x, self.shift, self.mask = x, int(shift), bool(mask)
+        self.width = dataset.BINS.stop - dataset.BINS.start
+        self.cols = torch.arange(self.width, device=x.device)
+
+    def center(self, block=4096):
+        """검증·평가 입력: 가운데 60칸을 창마다 표준화(증강 없는 학습의 창과 같다)."""
+        if not self.shift:
+            return self.x
+        s = self.shift
+        return torch.cat([standardize_t(self.x[a: a + block, :, :, s: s + self.width]) for a in range(0, len(self.x), block)])
+
+    def params(self, count, rng):
+        """묶음 count개의 (가운데 기준 이동 칸 (count,), 시간 가리기 [시작, 끝) (count, 2), 거리 가리기 [시작, 끝) (count, 2)). 가리지 않으면 [0, 0)."""
+        on = rng.random(count) < AUG_FRACTION
+        move = np.where(on, rng.integers(-self.shift, self.shift + 1, count), 0)
+        rows, bins = np.zeros((count, 2), dtype=np.int64), np.zeros((count, 2), dtype=np.int64)
+        if self.mask:
+            hide = on & (rng.random(count) < MASK_PROB)
+            tw = rng.integers(MASK_ROWS[0], MASK_ROWS[1] + 1, count)
+            t0 = (rng.random(count) * (dataset.WINDOW - tw + 1)).astype(np.int64)
+            bw = rng.integers(MASK_BINS[0], MASK_BINS[1] + 1, count)
+            b0 = (rng.random(count) * (self.width - bw + 1)).astype(np.int64)
+            rows = np.where(hide[:, None], np.stack([t0, t0 + tw], axis=1), 0)
+            bins = np.where(hide[:, None], np.stack([b0, b0 + bw], axis=1), 0)
+        return move, rows, bins
+
+    def batch(self, i, lengths, rng):
+        """미니배치 입력 (B, 2, 96, 60). i = 프레임 번호 텐서, lengths = 묶음 길이(batch_pieces)."""
+        move, rows, bins = (np.repeat(v, lengths, axis=0) for v in self.params(len(lengths), rng))
+        dev = self.x.device
+        sub = self.x[i]
+        if self.shift:
+            cols = torch.as_tensor(move + self.shift, device=dev)[:, None] + self.cols[None, :]
+            sub = standardize_t(torch.gather(sub, 3, cols[:, None, None, :].expand(-1, sub.shape[1], sub.shape[2], -1)))
+        if self.mask:
+            r = torch.arange(dataset.WINDOW, device=dev)[None, :]
+            c = self.cols[None, :]
+            rows, bins = torch.as_tensor(rows, device=dev), torch.as_tensor(bins, device=dev)
+            hidden = ((r >= rows[:, :1]) & (r < rows[:, 1:]))[:, None, :, None] | ((c >= bins[:, :1]) & (c < bins[:, 1:]))[:, None, None, :]
+            sub = sub.masked_fill(hidden, 0.0)
+        return sub
 
 
 def seed_all(seed):
@@ -147,9 +218,10 @@ def eval_loss(model, x, y, segs):
     return float(loss_fn(pred, y[torch.as_tensor(idx, device=x.device)], torch.as_tensor(pairs_of(segs), device=x.device)))
 
 
-def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES):
+def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES, augment=None):
     """(가장 좋던 가중치의 모델, 기록, 가장 좋던 epoch, 멈춘 까닭 "patience" | "epochs" | "time"). x (N, 2, 96, 60)·y (N, 60)는 같은 장치의
-    텐서. 학습·검증 손실이 유한하지 않으면(nan·inf) 그 자리에서 이유를 담은 FloatingPointError로 멈춘다."""
+    텐서. 학습·검증 손실이 유한하지 않으면(nan·inf) 그 자리에서 이유를 담은 FloatingPointError로 멈춘다. augment(Augment)를 주면 학습
+    미니배치만 그것으로 만들고 검증은 x 그대로다."""
     torch.manual_seed(seed)
     model = make_model().to(x.device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
@@ -159,9 +231,10 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MIN
     for epoch in range(1, epochs + 1):
         model.train()
         total, count = 0.0, 0
-        for idx, pair in batches(train_segs, rng):
+        for idx, pair, lengths in batch_pieces(train_segs, rng):
             i = torch.as_tensor(idx, device=x.device)
-            loss = loss_fn(model(x[i]), y[i], torch.as_tensor(pair, device=x.device))
+            inputs = x[i] if augment is None else augment.batch(i, lengths, rng)
+            loss = loss_fn(model(inputs), y[i], torch.as_tensor(pair, device=x.device))
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -542,9 +615,15 @@ def main():
     parser.add_argument("--offset", type=int, default=0, help="blocks 모드: 고정 무늬(블록 번호 mod 20)를 블록 단위로 돌리는 칸 수")
     parser.add_argument("--test", action="append", metavar="세션", help="session 모드: 시험 세션(여러 번 줄 수 있음. 없으면 마지막 착용 묶음 전체 — '워치 다시 참' 표시 세션부터 다음 표시 전까지)")
     parser.add_argument("--val", action="append", metavar="세션", help="session 모드: 검증 세션(여러 번 줄 수 있음. 없으면 시험이 아닌 가장 늦은 세션)")
+    parser.add_argument("--shift", type=int, default=0, metavar="칸", help="학습 증강: 거리 축 ±칸 무작위 이동(논문 5칸 ≈ 1.8 cm, 0이면 끔)")
+    parser.add_argument("--mask", action="store_true", help="학습 증강: 시간 5–15줄·거리 5–10칸 구간 가리기(논문)")
     parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
-    ds, lines = dataset.build(args.data, args.sessions)
+    if not 0 <= args.shift <= dataset.BINS.start:
+        print(f"--shift는 0…{dataset.BINS.start}칸")
+        return 1
+    wide = slice(dataset.BINS.start - args.shift, dataset.BINS.stop + args.shift)
+    ds, lines = dataset.build(args.data, args.sessions, bins=wide, standardized=args.shift == 0)
     print("\n".join(lines))
     if ds is None:
         print("쓸 세션이 없음")
@@ -574,11 +653,17 @@ def main():
     print(f"{run}: {mode}, 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}프레임, 장치 {device}"
           f"{'(' + torch.cuda.get_device_name(0) + ')' if device == 'cuda' else ' — GPU가 없어 아주 느리다'}")
     x = torch.as_tensor(ds["x"], device=device)
+    augment = None
+    if args.shift or args.mask:
+        augment = Augment(x, args.shift, args.mask)
+        x = augment.center()
+        hide = f", 그중 {MASK_PROB:.0%}에 시간 {MASK_ROWS[0]}–{MASK_ROWS[1]}줄·거리 {MASK_BINS[0]}–{MASK_BINS[1]}칸 가리기" if args.mask else ""
+        print(f"증강: 묶음의 {AUG_FRACTION:.0%}에 거리 ±{args.shift}칸 이동{hide}")
     y = torch.as_tensor(ds["y"], device=device)
     start = time.time()
     try:
         model, history, best_epoch, stopped = fit(x, y, segments(ds["frame_ns"], ds["session"], train), segments(ds["frame_ns"], ds["session"], val),
-                                                  args.epochs, args.seed, max_minutes=args.max_minutes)
+                                                  args.epochs, args.seed, max_minutes=args.max_minutes, augment=augment)
     except FloatingPointError as e:
         print(f"학습을 멈춤: {e}")
         return 1
@@ -593,7 +678,9 @@ def main():
               "frames": {"train": int(len(train)), "val": int(len(val)), "test": int(len(test))}, "seed": args.seed,
               "epochs": len(history), "maxEpochs": args.epochs, "maxMinutes": args.max_minutes, "stoppedBy": stopped, "bestEpoch": best_epoch,
               "trainSeconds": seconds,
-              "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history, "mix": mix, "split": split})
+              "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history, "mix": mix, "split": split,
+              "augment": {"shift": args.shift, "mask": args.mask, "fraction": AUG_FRACTION, "maskProb": MASK_PROB, "maskRows": list(MASK_ROWS),
+                          "maskBins": list(MASK_BINS)} if augment else None})
     torch.save({"arch": ARCH, "in_chans": 2, "num_classes": 60, "bins": [dataset.BINS.start, dataset.BINS.stop], "window": dataset.WINDOW,
                 "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "state_dict": model.state_dict()},
                os.path.join(folder, "model.pt"))

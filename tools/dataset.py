@@ -162,20 +162,22 @@ def standardize(a):
     return (a - mean) / np.where(std > 0, std, 1.0)
 
 
-def windows(raw, diff, rows, block=512):
-    """모델 입력 (N, 2, 96, 60) float32. raw (600, R)·diff (600, R−1)는 profiles.npy·diff_profiles.npy(mmap이어도 된다)."""
-    raw60 = np.asarray(raw[BINS], dtype=np.float64).T  # (R, 60)
-    diff60 = np.asarray(diff[BINS], dtype=np.float64).T  # (R − 1, 60)
+def windows(raw, diff, rows, block=512, bins=BINS, standardized=True):
+    """모델 입력 (N, 2, 96, 칸 수) float32. raw (600, R)·diff (600, R−1)는 profiles.npy·diff_profiles.npy(mmap이어도 된다).
+    bins를 넓히고 standardized=False면 표준화 전 값이다(train --shift: 학습 때 60칸을 잘라 표준화한다)."""
+    raw60 = np.asarray(raw[bins], dtype=np.float64).T  # (R, 칸 수)
+    diff60 = np.asarray(diff[bins], dtype=np.float64).T  # (R − 1, 칸 수)
     raw_cols, diff_cols = window_columns(rows)
     out = np.empty((len(raw_cols), 2, WINDOW, raw60.shape[1]), dtype=np.float32)
     for a in range(0, len(raw_cols), block):
-        out[a: a + block, 0] = standardize(raw60[raw_cols[a: a + block]])
-        out[a: a + block, 1] = standardize(diff60[diff_cols[a: a + block]])
+        prep = standardize if standardized else (lambda v: v)
+        out[a: a + block, 0] = prep(raw60[raw_cols[a: a + block]])
+        out[a: a + block, 1] = prep(diff60[diff_cols[a: a + block]])
     return out
 
 
-def session_data(data, name):
-    """세션 하나: (학습 자료 dict 또는 None, 보고 줄)."""
+def session_data(data, name, bins=BINS, standardized=True):
+    """세션 하나: (학습 자료 dict 또는 None, 보고 줄). bins·standardized는 창 x를 만드는 방식(windows)."""
     out = os.path.join(data, "processed", name)
     folder = hs_io.session_folder(data, name)
     p = read_pairs(os.path.join(out, "pairs.csv"))
@@ -218,7 +220,7 @@ def session_data(data, name):
     labelled = (p["prompt"] >= 0) & (p["edge"] == 0) & (p["classId"] != pairs.PAUSE_CLASS) & (p["flag"] != "wrong")
     length_mm = float(np.median(length[good])) * 1000.0
     lines.append(f"  L(손목–새끼 MCP 중앙값) {length_mm:.1f} mm, 엄지가 손바닥 쪽인 프레임 {palmar:.1%}, 라벨 붙은 프레임 {int((use & labelled).sum())}개")
-    part = {"x": windows(raw, diff, p["row"][use]), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
+    part = {"x": windows(raw, diff, p["row"][use], bins=bins, standardized=standardized), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
             "row": p["row"][use], "prompt": p["prompt"][use].astype(np.int32), "class_id": p["classId"][use].astype(np.int16),
             "flag": p["flag"][use], "edge": p["edge"][use] == 1, "labelled": labelled[use], "v9": v9.astype(np.float32),
             "name": name, "hand": hand, "length_mm": length_mm, "rewear": bool(phone.meta.get("rewear")),
@@ -249,8 +251,8 @@ def merge(parts):
     return ds
 
 
-def build(data, names=()):
-    """(학습 자료 dict 또는 None, 보고 줄). 세션 이름이 없으면 쓸 수 있는 세션 모두."""
+def build(data, names=(), bins=BINS, standardized=True):
+    """(학습 자료 dict 또는 None, 보고 줄). 세션 이름이 없으면 쓸 수 있는 세션 모두. bins·standardized는 창 x를 만드는 방식(windows)."""
     parts, lines = [], []
     for name, why in hs_io.chosen(data, names):
         if not why:
@@ -259,7 +261,7 @@ def build(data, names=()):
             lines.append(f"{name}: 건너뜀({why})")
             continue
         try:
-            part, more = session_data(data, name)
+            part, more = session_data(data, name, bins, standardized)
         except Exception as e:  # noqa: BLE001  한 세션이 넘어져도 다른 세션은 쓴다
             part, more = None, [f"{name}: 처리 중 오류로 건너뜀({type(e).__name__}: {e})"]
         lines += more
