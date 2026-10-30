@@ -185,6 +185,7 @@ class RecorderService : LifecycleService() {
             volumeSkipped = start.skipped,
             volumeLeftover = leftover.takeIf { it.pending != null },
             sourceRequested = sourceChoice,
+            shape = settings.shape,
         )
         lastOutputs = start.outputs
         runCatching { am.registerAudioDeviceCallback(outputWatch, Handler(Looper.getMainLooper())) } // 등록할 때 지금 목록으로 한 번 불린다
@@ -194,7 +195,7 @@ class RecorderService : LifecycleService() {
             return
         }
         log?.setSource(rec.sourceName, rec.fallbackReason) // 고른 음원을 열지 못했으면 VOICE_RECOGNITION으로 연 것을 적는다
-        val play = SonarPlayer(this, Sweep.pcm16(settings.window, settings.amplitude), onError = ::onAudioError)
+        val play = SonarPlayer(this, Sweep.pcm16(settings.window, settings.amplitude, settings.shape), onError = ::onAudioError)
         player = play
         play.start()?.let {
             finish(StopReason.ERROR, it)

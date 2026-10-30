@@ -46,6 +46,8 @@ class RecordingLog(
     private val volumeLeftover: VolumeRestore? = null,
     /** 워치 화면·원격 시작에서 고른 녹음 음원(2026-10-28). null = 고르는 기능 전의 기록. */
     private val sourceRequested: RecordSource? = null,
+    /** 처프 모양(2026-10-30). `tx.shape`·`tx.topHz`에 적는다. */
+    private val shape: SweepShape = SweepShape.SAW,
 ) {
     private val lock = Any()
     private var source = source
@@ -145,9 +147,11 @@ class RecordingLog(
                 ),
                 "tx" to linkedMapOf<String, Any?>(
                     "f0Hz" to SonarSpec.START_HZ,
-                    "bandwidthHz" to SonarSpec.BANDWIDTH_HZ,
+                    "bandwidthHz" to Sweep.topHz(shape) - SonarSpec.START_HZ,
                     "samples" to SonarSpec.SWEEP_SAMPLES,
                     "window" to window.id,
+                    "shape" to shape.id,
+                    "topHz" to Sweep.topHz(shape),
                     "amplitude" to amplitude,
                 ),
                 "volume" to linkedMapOf<String, Any?>(

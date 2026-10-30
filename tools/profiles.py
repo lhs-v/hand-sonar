@@ -6,11 +6,13 @@
 1. 세션 구간(meta 시작 − 1 s ~ 끝 + 1 s)을 align.json 맞춤으로 워치 프레임으로 바꾸고, 녹음 처음부터 센 600샘플 줄로 자른다.
    필터 가장자리를 버리려고 앞뒤 0.1 s를 더 읽는다.
 2. 18–21 kHz 5차 버터워스 대역 필터(sosfiltfilt, 위상 0).
-3. 줄마다 송신 처프(rec.json tx의 창·진폭, 16비트 반올림)와 부호 있는 원형 상관 600칸: c[k] = Σ 줄[(j+k) mod 600]·tx[j].
-   rec.json에 tx(창 hann·none과 진폭)가 없으면 창 함수를 짐작하지 않고 그 녹음을 거부한다.
+3. 줄마다 송신 처프(rec.json tx의 창·진폭·모양, 16비트 반올림)와 부호 있는 원형 상관 600칸: c[k] = Σ 줄[(j+k) mod 600]·tx[j].
+   rec.json에 tx(창 hann·none·tukey와 진폭)가 없으면 창 함수를 짐작하지 않고 그 녹음을 거부한다. 모양(tx.shape)이 없으면 톱니(옛 녹음),
+   삼각(triangle)이면 앞 300샘플은 18 kHz → 21.04 kHz, 뒤 300샘플은 다시 18 kHz(shared Sweep와 같은 식)다.
 4. 직접 경로 따라가기(설계 §8): 줄마다 상관 포락선(칸 방향 힐베르트 크기)의 최대 칸을 본다. 지금 칸에서 3칸 넘게 벗어난 줄이
    한두 줄이면 무시하고, 서로 3칸 안인 줄이 3줄 연속 벗어나면 그 세 줄부터 새 칸으로 옮긴다(워치8 직접 경로는 약 90샘플씩 튄다).
-   포락선 최대가 그 줄 칸 중앙값의 20배 아래인 줄은 직접 경로가 없는 줄(재생 끊김 등)로 보고 판단에 넣지 않는다. 그런 줄과,
+   포락선 최대가 그 줄 칸 중앙값의 20배(삼각 처프는 4배 — 아래 DIRECT_MIN_TRIANGLE) 아래인 줄은 직접 경로가 없는 줄(재생 끊김 등)로 보고
+   판단에 넣지 않는다. 그런 줄과,
    무시한 한두 줄 튐(직접 경로가 따라간 칸에서 3칸 넘게 벗어남)은 ok=False로 적어 뒤 도구가 쓰지 않게 한다.
    실측(워치8 녹음 2개): 포락선 최대 칸은 ±3칸 안에서만 흔들렸고 포락선 최대/중앙값은 중앙 194배였다. |원본| 최대 칸은 반송파 탓에
    4–7칸씩 건너뛰어 따라가기에 쓰지 않는다.
@@ -48,17 +50,29 @@ PAD_SEC = 0.1  # 필터 가장자리용으로 더 읽는 시간
 TOL = 3  # 이 칸 수 안이면 같은 직접 경로로 본다(실측 흔들림 ±3칸)
 CONFIRM = 3  # 이만큼 줄이 연속으로 옮겨 가야 따라간다(설계 §8)
 INIT_ROWS = 80  # 처음 칸은 직접 경로가 있는 첫 1 s 줄의 최빈값
-DIRECT_MIN = 20.0  # 포락선 최대 / 칸 중앙값이 이보다 작으면 직접 경로가 없는 줄(실측 중앙 194)
+DIRECT_MIN = 20.0  # 포락선 최대 / 칸 중앙값이 이보다 작으면 직접 경로가 없는 줄(실측 중앙 194). 이상적인 톱니 처프 자기상관(39.5)의 약 절반
+DIRECT_MIN_TRIANGLE = 4.0  # 삼각 처프: 한 주기 전체 상관에 오름 반 × 내림 반의 엇갈린 성분이 모든 칸에 깔려 이상적인 줄도 8.1이다. 같은 절반 규칙
 NEAR = slice(ROW0 + 1, ROW0 + 61)  # 직접 경로 바로 뒤 60칸 = 0–21.4 cm(손 거리, 모델 입력 폭)
 FAR = slice(ROW0 + 120, ROW0 + 180)  # 같은 폭의 손 밖(43–64 cm), 견줌용
 
 
-def tx_template(window, amplitude):
-    """워치가 낸 처프 한 주기(shared Sweep.pcm16과 같은 식: 18→21 kHz 600샘플, 한 창이면 대칭 한 창, Tukey면 양 끝 TUKEY_RAMP샘플만
+def tx_phase(shape, i):
+    """샘플 i의 처프 위상(라디안, shared Sweep.phase와 같은 식). 톱니는 18→21 kHz, 삼각은 앞 반 18 kHz → TRIANGLE_TOP_HZ, 뒤 반은 되돌아온다."""
+    t = np.asarray(i, dtype=np.float64) / RATE
+    if shape == "triangle":
+        half = N / 2 / RATE
+        k = (TRIANGLE_TOP_HZ - 18_000) / half
+        u = t - half
+        return 2 * np.pi * np.where(t <= half, 18_000 * t + 0.5 * k * t * t,
+                                    18_000 * half + 0.5 * k * half * half + TRIANGLE_TOP_HZ * u - 0.5 * k * u * u)
+    return 2 * np.pi * (18_000 * t + 0.5 * (3_000 / (N / RATE)) * t * t)
+
+
+def tx_template(window, amplitude, shape="saw"):
+    """워치가 낸 처프 한 주기(shared Sweep.pcm16과 같은 식: 600샘플, 모양은 tx_phase, 한 창이면 대칭 한 창, Tukey면 양 끝 TUKEY_RAMP샘플만
     0.5 − 0.5·cos(π·j/TUKEY_RAMP)(j = 끝에서 센 자리), 16비트 반올림)."""
     i = np.arange(N)
-    t = i / RATE
-    w = np.sin(2 * np.pi * (18_000 * t + 0.5 * (3_000 / (N / RATE)) * t * t))
+    w = np.sin(tx_phase(shape, i))
     if window == "hann":
         w = w * (0.5 - 0.5 * np.cos(2 * np.pi * i / (N - 1)))
     elif window == "tukey":
@@ -108,15 +122,20 @@ class Profiles:
     moves: np.ndarray  # 따라간 칸을 옮긴 자리 k(direct[k] ≠ direct[k+1])
 
 
-def compute(x, tx, front=0, back=0):
-    """x = 앞 front샘플 + 600샘플 줄 R개 + 뒤 back샘플. 필터를 x 전체에 건 뒤 앞뒤를 버리고 줄로 나눈다."""
+def direct_min(shape):
+    """직접 경로가 있는 줄로 볼 포락선 최대 / 칸 중앙값 하한(처프 모양마다)."""
+    return DIRECT_MIN_TRIANGLE if shape == "triangle" else DIRECT_MIN
+
+
+def compute(x, tx, front=0, back=0, direct_floor=DIRECT_MIN):
+    """x = 앞 front샘플 + 600샘플 줄 R개 + 뒤 back샘플. 필터를 x 전체에 건 뒤 앞뒤를 버리고 줄로 나눈다. direct_floor = direct_min(모양)."""
     y = sosfiltfilt(SOS, np.asarray(x, dtype=np.float64))
     y = y[front: len(y) - back]
     rows = y[: len(y) // N * N].reshape(-1, N)
     prof = np.fft.irfft(np.fft.rfft(rows, axis=1) * np.conj(np.fft.rfft(tx)), n=N, axis=1)
     env = np.abs(hilbert(prof, axis=1))
     peaks = env.argmax(axis=1)
-    ok = env.max(axis=1) >= DIRECT_MIN * np.median(env, axis=1)
+    ok = env.max(axis=1) >= direct_floor * np.median(env, axis=1)
     tracked = track(peaks, ok)
     d = (np.abs(prof).argmax(axis=1) - tracked + N // 2) % N - N // 2
     near = ok & (np.abs(d) <= TOL)
@@ -157,17 +176,21 @@ def step_rows(clock, frames, method, s1=None, s2=None):
 
 
 WINDOWS = ("hann", "none", "tukey")  # rec.json tx.window(shared SweepWindow.id)
+SHAPES = ("saw", "triangle")  # rec.json tx.shape(shared SweepShape.id). 없으면 saw
+TRIANGLE_TOP_HZ = 21_040.0  # 삼각 처프의 꼭대기(shared SonarSpec.TRIANGLE_TOP_HZ): 한 주기가 244바퀴라 이음새에서 위상이 이어진다
 TUKEY_RAMP = 60  # Tukey 창의 양 끝 경사(샘플, shared SonarSpec.TUKEY_RAMP_SAMPLES와 같은 값)
 
 
 def tx_spec(rec):
-    """rec.json tx의 (창, 진폭). 없거나 모르는 창이면 ValueError(창 함수를 짐작하지 않는다. 앱 기본값 hann과 다르게 짐작하면 상관이 틀린다)."""
+    """rec.json tx의 (창, 진폭, 모양). 없거나 모르는 창·모양이면 ValueError(창 함수를 짐작하지 않는다. 앱 기본값 hann과 다르게 짐작하면
+    상관이 틀린다). 모양 칸이 없는 녹음은 모양을 고르기 전(2026-10-30 전)의 톱니다."""
     tx = rec.get("tx")
     window = tx.get("window") if isinstance(tx, dict) else None
     amplitude = hs_io.num(tx, "amplitude")
-    if window not in WINDOWS or amplitude is None:
-        raise ValueError(f"rec.json tx가 없거나 창·진폭을 모름(tx {tx!r})")
-    return window, amplitude
+    shape = tx.get("shape", "saw") if isinstance(tx, dict) else None
+    if window not in WINDOWS or amplitude is None or shape not in SHAPES:
+        raise ValueError(f"rec.json tx가 없거나 창·진폭·모양을 모름(tx {tx!r})")
+    return window, amplitude, shape
 
 
 def save_npy(path, array):
@@ -187,7 +210,7 @@ def run(data, name):
     meta = hs_io.read_json(os.path.join(hs_io.session_folder(data, name), "meta.json"))
     rec = a.recording
     try:
-        window, amplitude = tx_spec(rec.rec)
+        window, amplitude, shape = tx_spec(rec.rec)
     except ValueError as e:
         return [f"{name}: 건너뜀(워치 녹음 {rec.name}: {e})"], False
     t0 = hs_io.nanos(meta["start"], "elapsedNs") - MARGIN_SEC * 1e9
@@ -198,7 +221,7 @@ def run(data, name):
         return [f"{name}: 건너뜀(세션 구간이 워치 녹음 {rec.name} 밖)"], False
     pad = int(PAD_SEC * RATE)
     a0, b0 = max(0, r0 * N - pad), min(rec.frames, r1 * N + pad)
-    p = compute(rec.read(a0, b0), tx_template(window, amplitude), r0 * N - a0, b0 - r1 * N)
+    p = compute(rec.read(a0, b0), tx_template(window, amplitude, shape), r0 * N - a0, b0 - r1 * N, direct_min(shape))
     frames = (r0 + np.arange(p.raw.shape[1], dtype=np.int64)) * N
     w = info["watch"]
     stepped = step_rows(rec.clock, frames, info["method"], (w["start"] or {}).get("frame"), (w["end"] or {}).get("frame"))

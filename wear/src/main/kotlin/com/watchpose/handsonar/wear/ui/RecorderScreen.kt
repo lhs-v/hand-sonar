@@ -32,6 +32,7 @@ import androidx.wear.compose.material3.Text
 import com.watchpose.handsonar.shared.RecordSource
 import com.watchpose.handsonar.shared.SonarSpec
 import com.watchpose.handsonar.shared.StorageBudget
+import com.watchpose.handsonar.shared.SweepShape
 import com.watchpose.handsonar.shared.SweepWindow
 import com.watchpose.handsonar.wear.HandSonarApp
 import com.watchpose.handsonar.wear.record.RecorderService
@@ -114,6 +115,14 @@ fun RecorderScreen(settings: SonarSettings, onStart: () -> Unit, onStop: () -> U
                         modifier = Modifier.fillMaxWidth(),
                         secondaryLabel = { Text(windowLabel(values.window)) },
                         label = { Text("처프 창") },
+                    )
+                }
+                item {
+                    FilledTonalButton(
+                        onClick = settings::cycleShape,
+                        modifier = Modifier.fillMaxWidth(),
+                        secondaryLabel = { Text(shapeLabel(values.shape)) },
+                        label = { Text("처프 모양") },
                     )
                 }
                 item {
@@ -220,6 +229,12 @@ private fun windowLabel(w: SweepWindow): String = when (w) {
     SweepWindow.TUKEY -> "Tukey 창(양 끝 10%)"
     SweepWindow.HANN -> "한 창"
     SweepWindow.NONE -> "창 없음"
+}
+
+/** "처프 모양" 버튼의 보조 글. */
+private fun shapeLabel(s: SweepShape): String = when (s) {
+    SweepShape.SAW -> "톱니 18→21 kHz(공개 데이터와 같음)"
+    SweepShape.TRIANGLE -> "삼각 18→21→18 kHz"
 }
 
 /** "녹음 음원" 버튼의 보조 글. */

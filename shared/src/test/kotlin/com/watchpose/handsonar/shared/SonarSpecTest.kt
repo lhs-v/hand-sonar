@@ -19,6 +19,23 @@ class SonarSpecTest {
     }
 
     @Test
+    fun shapeIdsDefaultAndButtonCycle() {
+        assertEquals(listOf("saw", "triangle"), SweepShape.entries.map { it.id })
+        assertEquals(SweepShape.SAW, SonarSpec.DEFAULT_SHAPE)
+        assertEquals(SweepShape.TRIANGLE, SonarSpec.nextShape(SweepShape.SAW))
+        assertEquals(SweepShape.SAW, SonarSpec.nextShape(SweepShape.TRIANGLE))
+        assertEquals(SweepShape.TRIANGLE, SweepShape.of("triangle"))
+        assertEquals(null, SweepShape.of("square"))
+    }
+
+    @Test
+    fun triangleTopMakesAWholeNumberOfCyclesPerSweep() {
+        // 평균 주파수 × 한 주기 = 정수 바퀴여야 주기를 이어 붙인 자리에서 위상이 이어진다
+        val cycles = (SonarSpec.START_HZ + SonarSpec.TRIANGLE_TOP_HZ) / 2 * SonarSpec.SWEEP_SAMPLES / SonarSpec.SAMPLE_RATE
+        assertEquals(244.0, cycles, 1e-9)
+    }
+
+    @Test
     fun windowIdsAreRecJsonNames() {
         assertEquals(listOf("none", "hann", "tukey"), SweepWindow.entries.map { it.id })
     }

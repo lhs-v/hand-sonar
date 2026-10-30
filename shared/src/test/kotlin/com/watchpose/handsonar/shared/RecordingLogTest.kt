@@ -18,6 +18,28 @@ class RecordingLogTest {
     )
 
     @Test
+    fun triangleShapeIsWrittenToTx() {
+        val l = RecordingLog(
+            app = "0.1.0",
+            device = "samsung SM-L320",
+            android = "16 (API 36)",
+            start = ClockPoint(wallMs = 1_000L, elapsedNs = 5_000L),
+            source = "UNPROCESSED",
+            window = SweepWindow.NONE,
+            amplitude = 0.5f,
+            volumeStream = "music",
+            volumeIndex = 13,
+            volumeMax = 15,
+            shape = SweepShape.TRIANGLE,
+        )
+        val json = l.toJson()
+        assertTrue(
+            """"tx":{"f0Hz":18000.0,"bandwidthHz":3040.0,"samples":600,"window":"none","shape":"triangle","topHz":21040.0,"amplitude":0.5},""" in json,
+            json,
+        )
+    }
+
+    @Test
     fun runningLogHasNullStopAndCurrentParts() {
         val l = log()
         l.addRecordClock(48_000, 1_005_000_000, 47_040)
@@ -48,7 +70,11 @@ class RecordingLogTest {
             """"audio":{"rate":48000,"bits":16,"channels":1,"source":"VOICE_RECOGNITION","sourceRequested":null,"sourceFallback":null},""" in json,
             json,
         )
-        assertTrue(""""tx":{"f0Hz":18000.0,"bandwidthHz":3000.0,"samples":600,"window":"none","amplitude":0.5},""" in json, json)
+        // 처프 모양을 고르지 않은 기록은 톱니(18 → 21 kHz)다
+        assertTrue(
+            """"tx":{"f0Hz":18000.0,"bandwidthHz":3000.0,"samples":600,"window":"none","shape":"saw","topHz":21000.0,"amplitude":0.5},""" in json,
+            json,
+        )
         // 녹음 볼륨 "그대로": 고른 값·되돌린 값이 없고 원래 볼륨은 녹음 동안 볼륨과 같다. 외부 출력·바뀜·건너뜀·남은 기록도 없다
         assertTrue(
             """"volume":{"stream":"music","index":10,"max":15,"choice":null,"original":10,"restored":null,"changes":[],""" +

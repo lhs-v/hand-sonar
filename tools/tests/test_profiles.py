@@ -82,6 +82,37 @@ class ProfilesTest(unittest.TestCase):
             self.assertEqual(np.round(wave[j] * w * 0.5 * 32767), tukey[j])
             self.assertEqual(np.round(wave[N - 1 - j] * w * 0.5 * 32767), tukey[N - 1 - j])
 
+    def test_triangle_template_follows_the_shared_sweep(self):
+        # shared Sweep.phase(TRIANGLE)와 같은 식: 앞 300샘플 18 kHz → 21.04 kHz, 뒤 300샘플 되돌아옴, 한 주기 244바퀴라 이음새에서 위상이 이어진다
+        self.assertAlmostEqual(244.0, profiles.tx_phase("triangle", N) / (2 * np.pi), places=9)
+        self.assertAlmostEqual(243.75, profiles.tx_phase("saw", N) / (2 * np.pi), places=9)
+        ph = profiles.tx_phase("triangle", np.arange(N + 1))
+        freq = np.diff(ph) / (2 * np.pi) * profiles.RATE  # 샘플 사이 평균 주파수
+        self.assertLess(abs(freq[0] - 18_000), 25)
+        self.assertLess(abs(freq[N // 2] - profiles.TRIANGLE_TOP_HZ), 25)
+        self.assertLess(abs(freq[-1] - 18_000), 25)
+        tx = profiles.tx_template("none", 0.5, "triangle")
+        np.testing.assert_array_equal(np.round(np.sin(ph[:N]) * 0.5 * 32767), tx)
+
+    def test_triangle_echo_peaks_at_its_distance(self):
+        # 직접 경로와 40샘플(약 14 cm) 뒤 메아리: 삼각 처프로 상관해도 메아리가 칸 300 + 40에 선다(더 가까우면 두 모양 모두 직접 경로 곁봉우리와
+        # 겹쳐 2–4칸 밀린다)
+        tx = profiles.tx_template("none", 0.5, "triangle")
+        row = np.roll(tx, 7) + 0.3 * np.roll(tx, 7 + 40)
+        # 한 주기 전체 상관에는 오름 반 × 내림 반의 엇갈린 성분이 깔려 톱니 문턱(20)으로는 직접 경로를 못 찾는다
+        self.assertFalse(profiles.compute(np.tile(row, 30), tx).has_direct.any())
+        p = profiles.compute(np.tile(row, 30), tx, direct_floor=profiles.direct_min("triangle"))
+        self.assertTrue(p.ok[2:-2].all())
+        env = np.abs(hilbert(p.raw[:, 15]))
+        self.assertEqual(300, int(np.argmax(env)))
+        self.assertLessEqual(abs(int(np.argmax(env[330:351])) + 330 - 340), 1)
+
+    def test_tx_spec_reads_the_shape_and_old_recordings_are_saw(self):
+        self.assertEqual(("none", 0.5, "saw"), profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5}}))
+        self.assertEqual(("none", 0.5, "triangle"), profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5, "shape": "triangle"}}))
+        with self.assertRaises(ValueError):
+            profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5, "shape": "square"}})
+
     def test_tukey_direct_path_is_as_narrow_as_no_window(self):
         # 한 창은 직접 경로 봉우리를 두 배로 넓혀 손 에코를 덮었다(2026-10-28): Tukey는 창 없음과 비슷하게 좁다
         def width(window):

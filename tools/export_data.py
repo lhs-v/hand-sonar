@@ -94,9 +94,9 @@ def export_recording(data, out, name, seconds=RECORDING_SEC):
     """세션 없는 워치 녹음 하나: rec.json과 앞 seconds초의 정렬 프로파일(칸 BINS)."""
     folder = os.path.join(data, "watch", "recordings", name)
     w = hs_io.read_recording(folder)
-    window, amplitude = profiles.tx_spec(w.rec)
+    window, amplitude, shape = profiles.tx_spec(w.rec)
     n = min(seconds * profiles.RATE, w.frames) // profiles.N * profiles.N
-    p = profiles.compute(w.read(0, n), profiles.tx_template(window, amplitude))
+    p = profiles.compute(w.read(0, n), profiles.tx_template(window, amplitude, shape), direct_floor=profiles.direct_min(shape))
     dst = os.path.join(out, "recordings", name)
     os.makedirs(dst, exist_ok=True)
     shutil.copyfile(os.path.join(folder, "rec.json"), os.path.join(dst, "rec.json"))

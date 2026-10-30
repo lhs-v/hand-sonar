@@ -1,5 +1,6 @@
 package com.watchpose.handsonar.shared
 
+import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -11,9 +12,11 @@ class SweepTest {
     @Test
     fun oneSweepIs600SamplesWithinUnitAmplitude() {
         for (w in SweepWindow.entries) {
-            val s = Sweep.wave(w)
-            assertEquals(600, s.size)
-            assertTrue(s.all { it in -1f..1f })
+            for (shape in SweepShape.entries) {
+                val s = Sweep.wave(w, shape)
+                assertEquals(600, s.size)
+                assertTrue(s.all { it in -1f..1f })
+            }
         }
     }
 
@@ -57,6 +60,28 @@ class SweepTest {
         val peak = Sweep.pcm16(SweepWindow.NONE, 0.5f).maxOf { abs(it.toInt()) }
         assertTrue(peak in 16_000..16_384, "최대 $peak")
         assertTrue(Sweep.pcm16(SweepWindow.NONE, 1.5f).maxOf { abs(it.toInt()) } <= 32_767)
+    }
+
+    @Test
+    fun triangleRisesToTheTopAndComesBack() {
+        assertEquals(18_000.0, Sweep.instantFrequency(0, SweepShape.TRIANGLE))
+        assertEquals(SonarSpec.TRIANGLE_TOP_HZ, Sweep.instantFrequency(300, SweepShape.TRIANGLE))
+        assertEquals(18_000.0, Sweep.instantFrequency(600, SweepShape.TRIANGLE))
+        // 꼭대기(가운데) 근처가 양 끝보다 부호가 자주 바뀐다
+        val s = Sweep.wave(SweepWindow.NONE, SweepShape.TRIANGLE)
+        assertTrue(crossings(s, 0 until 100) < crossings(s, 250 until 350))
+        assertTrue(crossings(s, 500 until 600) < crossings(s, 250 until 350))
+    }
+
+    @Test
+    fun triangleLoopsWithoutAPhaseJumpButSawDoesNot() {
+        // 한 주기를 다 돈 위상: 삼각은 244바퀴라 다음 주기 첫 샘플(위상 0)과 이어지고, 톱니는 243.75바퀴라 4분의 1 바퀴 어긋난다
+        assertEquals(244.0, Sweep.phase(600, SweepShape.TRIANGLE) / (2 * PI), 1e-9)
+        assertEquals(243.75, Sweep.phase(600, SweepShape.SAW) / (2 * PI), 1e-9)
+        // 꼭대기에서도 위상 증가가 이어진다(앞 반 식과 뒤 반 식이 맞물림)
+        val before = Sweep.phase(300, SweepShape.TRIANGLE) - Sweep.phase(299, SweepShape.TRIANGLE)
+        val after = Sweep.phase(301, SweepShape.TRIANGLE) - Sweep.phase(300, SweepShape.TRIANGLE)
+        assertEquals(before, after, 1e-6)
     }
 
     @Test

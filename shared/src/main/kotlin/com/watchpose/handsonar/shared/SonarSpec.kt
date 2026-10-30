@@ -37,6 +37,26 @@ object SonarSpec {
     fun nextWindow(current: SweepWindow): SweepWindow = WINDOW_CHOICES[(WINDOW_CHOICES.indexOf(current) + 1) % WINDOW_CHOICES.size]
 
     /**
+     * 처프 모양의 처음 값은 톱니(18 → 21 kHz를 되풀이)다. 공개 WatchHand 데이터와 같은 모양이라 견주거나 미리 학습할 수 있다.
+     * 삼각(18 → 21 → 18 kHz, 2026-10-30)은 이음새에서 주파수와 위상이 끊기지 않아 창 없이도 딸깍이 없고, 한 줄 전체로 상관하면 움직이는
+     * 반사체의 거리 어긋남(도플러)이 오름·내림 반에서 서로 상쇄된다(시뮬레이션, 10 cm·0.3 m/s: 톱니 2.6 cm, 삼각 0.2 cm). 대역폭이 같아
+     * 봉우리 폭은 그대로다.
+     */
+    val DEFAULT_SHAPE: SweepShape = SweepShape.SAW
+
+    /**
+     * 삼각 처프의 꼭대기 주파수. 한 주기(600샘플)의 위상이 정수 바퀴(평균 19.52 kHz × 12.5 ms = 244바퀴)가 되게 21 kHz에서 40 Hz 올렸다.
+     * 그래서 주기를 이어 붙인 자리에서 위상도 이어진다. PC `tools/profiles.py`의 송신 처프가 같은 값을 쓴다.
+     */
+    const val TRIANGLE_TOP_HZ = 21_040.0
+
+    /** 워치 화면 "처프 모양" 버튼이 도는 차례. */
+    val SHAPE_CHOICES: List<SweepShape> = listOf(SweepShape.SAW, SweepShape.TRIANGLE)
+
+    /** "처프 모양" 버튼의 다음 값. */
+    fun nextShape(current: SweepShape): SweepShape = SHAPE_CHOICES[(SHAPE_CHOICES.indexOf(current) + 1) % SHAPE_CHOICES.size]
+
+    /**
      * 녹음 음원의 처음 값은 UNPROCESSED다(2026-10-28). WatchHand는 워치에서 UNPROCESSED로 녹음했다(§3.2). 워치8은 지원을 선언하지 않아 자동이면
      * VOICE_RECOGNITION이 되고, 그 녹음은 공개 데이터보다 손 움직임 신호가 약했다. 열리지 않으면 워치가 VOICE_RECOGNITION으로 바꿔 녹음한다.
      */
@@ -88,6 +108,21 @@ enum class SweepWindow(val id: String) {
 
     /** 양 끝 [SonarSpec.TUKEY_RAMP_SAMPLES]만 반 코사인으로 올리고 내린다. */
     TUKEY("tukey"),
+}
+
+/** 처프 모양(2026-10-30). [id]는 rec.json의 `tx.shape`에 적는 이름이다. `tx.shape`가 없는 옛 녹음은 톱니다. */
+enum class SweepShape(val id: String) {
+    /** 600샘플 동안 18 → 21 kHz로 오르고 다음 주기에 18 kHz로 돌아간다(공개 데이터와 같음). */
+    SAW("saw"),
+
+    /** 300샘플 동안 18 kHz → [SonarSpec.TRIANGLE_TOP_HZ]로 오르고 300샘플 동안 18 kHz로 내린다. */
+    TRIANGLE("triangle"),
+    ;
+
+    companion object {
+        /** rec.json·설정의 이름에서. 모르는 이름이면 null. */
+        fun of(id: String?): SweepShape? = entries.firstOrNull { it.id == id }
+    }
 }
 
 /**

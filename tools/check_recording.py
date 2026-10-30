@@ -121,7 +121,7 @@ def check(folder):
     else:
         reason = stop["reason"]
         note = "(저장 공간 부족으로 자동 정지)" if reason == "storage" else ""
-        lines.append(f"정지 이유 {reason}{note}, 녹음 소스 {rec['audio']['source']}, 창 {rec['tx']['window']}, 진폭 {rec['tx']['amplitude']}")
+        lines.append(f"정지 이유 {reason}{note}, 녹음 소스 {rec['audio']['source']}, 창 {rec['tx']['window']}, 모양 {rec['tx'].get('shape', 'saw')}, 진폭 {rec['tx']['amplitude']}")
         requested, fallback = rec["audio"].get("sourceRequested"), rec["audio"].get("sourceFallback")
         if fallback:  # 보고만 한다(녹음은 성하다): 고른 음원 대신 VOICE_RECOGNITION으로 녹음했다
             lines.append(f"고른 녹음 음원 {requested}을 열지 못해 {rec['audio']['source']}로 녹음함({fallback})")
