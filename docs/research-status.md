@@ -125,6 +125,8 @@
 - 예측 뼈대는 근사다. 모델은 손바닥 틀 안의 모양만 내므로, 손 방향·크기·위치는 그 프레임 정답을 쓰고 손가락 모양만 예측으로 바꿔 그린다.
 - 나누기는 그 실행의 `metrics.json`대로 다시 만들고, 예측은 그 세션의 창을 다시 만들어 낸다.
 - 영상(얼굴)은 저장소에 없다. 데이터 묶음만 있는 PC에서는 화면 좌표 뼈대로 그린다(`--no-video`). `--seg`는 손만 남긴다.
+- `--mano`는 3D 뼈대 대신 MANO 손 메시를 그린다. 논문도 그림은 MANO로 그렸지만(§3.6) 모델은 관절 좌표를 낸다. 모양·크기는 세션 정답으로 하나 맞추고, 프레임마다 관절 21점에 손목 회전·자세를 맞춘다(평활 없음). MANO 모델 파일은 등록 후 받는 비상업 라이선스라 저장소에 없다.
+  - 2026-10-30 같은 두 세션: 맞춤 잔차(MANO 관절과 목표의 평균 거리)는 정답 2.9–3.3 mm, 예측 2.9–3.9 mm다. 우리 판 예측 메시는 동작과 상관없이 반쯤 편 손이다. 평균 자세가 MANO에서는 그럴듯한 손으로 보여, 메시만 보면 틀린 것이 덜 드러난다.
 - 2026-10-30 블록 판 시험 블록:
   - 우리 세션 20261028-201138: MPJPE 15.2 mm, 평균 자세 상수 14.8 mm. 시간 띠에서 모델 선이 평균 자세 선과 거의 겹친다.
   - 공개 세션 20250320-205102: 6.0 mm, 8.6 mm. 손이 평균 자세에서 벗어나는 구간에서 모델 선이 평균 자세 선 아래에 머문다.
@@ -251,7 +253,7 @@ python -I tools/experiments/transfer.py finetune ../public-as-ours/processed/tra
 
 # 학습 결과를 영상으로(그 실행의 시험 프레임). 데이터 묶음에는 영상이 없어 화면 좌표 뼈대로 그린다
 python -I tools/render_video.py ../hand-sonar-unpacked/processed/training/blocks-9 --data ../hand-sonar-unpacked --out ../hand-sonar-videos
-# 영상이 있는 PC는 손만 보이게, 공개 데이터는 원본 mp4를 준다
+# 영상이 있는 PC는 손만 보이게, 공개 데이터는 원본 mp4를 준다(MANO 메시로 그리려면 --mano <MANO_LEFT.pkl>)
 python -I tools/render_video.py ../hand-sonar-data/processed/training/blocks-9 --out ../hand-sonar-videos --seg
 python -I tools/render_video.py ../public-as-ours/processed/training/pub10-blocks --data ../public-as-ours --session 20250320-205102 --video "<받은 파일 폴더>/<접두>record_20250320_205102_215016.mp4" --out ../hand-sonar-videos
 ```

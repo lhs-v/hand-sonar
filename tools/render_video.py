@@ -1,7 +1,8 @@
 """학습한 모델의 결과를 영상으로 본다(손 소나): 세션 하나의 프레임마다 MediaPipe 정답 손 뼈대와 FastViT 예측을 함께 그린다.
 
     python -I tools/render_video.py <학습 결과 폴더> --out <출력 폴더> [--data 데이터 폴더] [--session 세션] [--frames test|all]
-                                    [--video 영상 파일 | --no-video] [--seg] [--check N] [--limit N] [--fps F] [--font 글꼴 [--font-bold 굵은 글꼴]]
+                                    [--video 영상 파일 | --no-video] [--seg] [--mano MANO_LEFT.pkl] [--check N] [--limit N] [--fps F]
+                                    [--font 글꼴 [--font-bold 굵은 글꼴]]
 
 - 학습 결과 폴더: train.py가 쓴 model.pt·dataset.npz·metrics.json. 나누기는 metrics.json의 mode·split(블록 offset, 세션 이름)으로
   train.split_frames를 다시 불러 만들고, 프레임 수가 metrics.json frames와 다르면 멈춘다. 예측은 그 세션의 창을 지금 처리 폴더에서 다시 만들어
@@ -18,7 +19,10 @@
   줄 수와 같고 버린 줄이 없을 때, 없으면(공개 데이터 변환 — --video로 원본 mp4를 준다) 줄 n을 영상의 n번째 프레임으로 본다. 기본 영상이 없거나
   맞지 않으면 영상 없이 그린다(--no-video와 같은 판: 왼쪽 패널은 어두운 바탕에 화면 좌표 뼈대). 영상은 가변 프레임률이라 처음부터 차례로 디코드한다.
 - --seg: 왼쪽 패널에서 손만 남긴다(hand_seg: 랜드마크 사전 마스크 + GrabCut). 랜드마크가 없는 프레임은 원본을 쓰지 않고 어두운 빈 패널.
-- 출력: <out>/<실행>_<세션>_<frames>[_seg].mp4(H.264 CRF 18, 초당 장 수 = 카메라 프레임 간격 중앙값). --check N이면 영상 대신 고르게 뽑은
+- --mano: 3D 뼈대 두 시점 대신 정답·예측 MANO 메시를 카메라에서 본 방향으로 나란히 그린다(mano.py — 모델 파일은 https://mano.is.tue.mpg.de
+  에 등록하고 받는다, 저장소에 넣지 않는다). 모양·크기는 세션 정답으로 하나, 손 방향·위치는 두 메시 모두 정답 그대로라 손가락 모양만
+  다르다. 프레임마다 따로 맞추고 평활하지 않는다(맞춤 잔차를 패널에 적는다).
+- 출력: <out>/<실행>_<세션>_<frames>[_seg][_mano].mp4(H.264 CRF 18, 초당 장 수 = 카메라 프레임 간격 중앙값). --check N이면 영상 대신 고르게 뽑은
   N장과 첫 제목 카드를 <out>/<같은 이름>-check/*.png로. 손·얼굴이 찍힌 영상에서 만들므로 --out이 저장소 안이면 멈춘다.
 - 필요한 것: torch·timm(예측), opencv-python, Pillow, imageio-ffmpeg(없으면 PATH의 ffmpeg), 한글 글꼴(render_draw.FONTS 또는 --font).
 """
@@ -50,6 +54,8 @@ NOTE_VIDEO = ("파란 뼈대는 근사입니다. 손 방향·크기·위치는 �
               "예측과 정답의 차이를 닮음 변환으로 영상 픽셀에 옮겼습니다.")
 NOTE_NO_VIDEO = ("영상 없이 MediaPipe 화면 좌표로 그린 뼈대입니다. 파란 뼈대는 근사입니다: 손 방향·크기·위치는 정답 그대로이고 "
                  "손가락 모양만 예측입니다.")
+NOTE_MANO = ("MANO 왼손을 프레임마다 관절 21점에 맞춘 메시입니다. 모양·크기는 세션 정답으로 하나, 손 방향·위치는 두 메시 모두 정답 그대로라 "
+             "손가락 모양만 다릅니다. 평활 없음. 잔차 = 맞춘 MANO 관절과 목표 관절의 평균 거리.")
 
 
 def note_3d(L):
@@ -291,6 +297,35 @@ def card(S, title, subtitle, seg, i, total):
     return D.card_image(title, subtitle, seg["title"], f"세션 {round(a):d}–{round(b):d} s", lines, f"{i + 1} / {total}")
 
 
+def mano_fit(S, path, frames, log=print):
+    """그릴 프레임의 MANO 메시 {"faces", "gt": {프레임: (정점 (V, 3) mm, 잔차 mm)}, "pred": {…}}. 모양·크기는 그 세션의 정답(거르기를 지난
+    프레임)으로 하나 맞추고, 정답·예측 관절에 프레임마다 손목 회전·자세를 맞춘다(mano 머리말). 정점은 목표와 같은 손바닥 틀(손목 원점)이다."""
+    import mano
+    import torch
+    layer = mano.Layer(mano.load(path), "cuda" if torch.cuda.is_available() else "cpu")
+    start = time.time()
+    gt = S["unit"] * S["L_mm"]  # (N, 21, 3) 손목(원점) 포함
+    ok = np.isfinite(gt).all(axis=(1, 2))
+    good = np.flatnonzero(ok & S["good"])
+    if not len(good):
+        raise ValueError("모양을 맞출 정답 프레임이 없음")
+    beta, log_s, res_shape = mano.fit_shape(layer, gt[good])
+    frames = np.asarray(frames, dtype=np.int64)
+    out = {"faces": layer.faces, "gt": {}, "pred": {}}
+    picks = {"gt": frames[ok[frames]], "pred": frames[np.isfinite(S["err"][frames])]}
+    targets = {"gt": gt[picks["gt"]], "pred": joints.with_wrist(S["pred"][picks["pred"]]) * S["L_mm"]}
+    res = {}
+    for key in ("gt", "pred"):
+        if not len(picks[key]):
+            continue
+        orient, pose, res[key] = mano.fit_pose(layer, targets[key], beta, log_s)
+        out[key] = {int(f): (v, float(r)) for f, v, r in zip(picks[key], mano.meshes(layer, beta, log_s, orient, pose), res[key])}
+    log(f"  MANO 맞춤: 모양 β·크기 {float(np.exp(log_s.item())):.3f}배(정답 {len(res_shape)}장, 잔차 평균 {res_shape.mean():.1f} mm), "
+        + ", ".join(f"{'정답' if k == 'gt' else '예측'} {len(r)}장 잔차 평균 {r.mean():.1f} mm(95% {np.percentile(r, 95):.1f})" for k, r in res.items())
+        + f", {time.time() - start:.0f} s")
+    return out
+
+
 def seg_alpha(S, n, frame_bgr, floor):
     """손만 보이는 판의 알파(render_draw.render_frame의 seg). 랜드마크가 없으면 alpha None."""
     pts = S["img_px"][n]
@@ -315,6 +350,7 @@ def main():
     source.add_argument("--video", help="영상 파일(없으면 <data>/phone/sessions/<세션>/video.mp4. 공개 데이터 변환은 원본 mp4)")
     source.add_argument("--no-video", action="store_true", help="영상 없이 화면 좌표 뼈대만")
     parser.add_argument("--seg", action="store_true", help="왼쪽 패널에서 손만 남긴다(GrabCut)")
+    parser.add_argument("--mano", metavar="MANO_LEFT.pkl", help="3D 뼈대 대신 정답·예측 MANO 메시(모델 파일 또는 mano_v1_2를 푼 폴더 — 저장소 밖)")
     parser.add_argument("--check", type=int, metavar="N", help="영상 대신 고르게 뽑은 N장과 첫 제목 카드를 PNG로")
     parser.add_argument("--limit", type=int, metavar="N", help="앞 N장만 그린다")
     parser.add_argument("--fps", type=float, help="출력 초당 장 수(없으면 카메라 프레임 간격 중앙값)")
@@ -350,14 +386,21 @@ def main():
     title = "세션 전체 — 학습·검증·시험 프레임 모두" if args.frames == "all" else TITLES[mode]
     subtitle = (f"FastViT-T12 · 실행 {run_name} · 세션 {name}({'왼손' if S['hand'] == 'left' else '오른손'}) · 정답 = MediaPipe 손 관절"
                 " · 시간은 학습 자료 첫 프레임부터")
-    bg = D.static_background(title, subtitle, (NOTE_VIDEO if video else NOTE_NO_VIDEO, note_3d(S["L_mm"])), S["ymax"], video=video is not None,
-                             mean_mm=S["mean_mm"])
+    bg = D.static_background(title, subtitle, (NOTE_VIDEO if video else NOTE_NO_VIDEO, NOTE_MANO if args.mano else note_3d(S["L_mm"])), S["ymax"],
+                             video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano))
     order = [(i, int(f)) for i, s in enumerate(segs) for f in s["frames"]]
     if args.limit:
         order = order[: args.limit]
     if args.check:
         order = [order[j] for j in sorted({int(round(x)) for x in np.linspace(0, len(order) - 1, args.check)})]
     want = {f: i for i, f in order}
+    meshes = None
+    if args.mano:
+        try:
+            meshes = mano_fit(S, args.mano, sorted(want))
+        except (ValueError, FileNotFoundError) as e:
+            print(f"멈춤: {e}")
+            return 1
     first_of = {int(s["frames"][0]): i for i, s in enumerate(segs)}
     fps = args.fps or 1e9 / float(np.median(np.diff(S["frame_ns"])))
     card_frames = max(1, int(round(CARD_SEC * fps)))
@@ -365,7 +408,7 @@ def main():
     if args.seg:
         sizes = [hand_seg.hand_size(px) for px in S["img_px"] if np.isfinite(px).all()]
         floor = hand_seg.SIZE_FLOOR * float(np.median(sizes)) if sizes else 0.0
-    stem = f"{run_name}_{name}_{args.frames}{'_seg' if args.seg else ''}"
+    stem = f"{run_name}_{name}_{args.frames}{'_seg' if args.seg else ''}{'_mano' if args.mano else ''}"
     os.makedirs(out, exist_ok=True)
     check_dir = os.path.join(out, stem + "-check")
     if args.check:
@@ -388,7 +431,8 @@ def main():
                 writer.write(img)
             cards += card_frames
         img = D.render_frame(S, bg, n, fr, frame_info(S, n, mode, segs[i], i, len(segs)), seg_alpha(S, n, fr, floor) if args.seg else None,
-                             timeline(S, segs[i], n))
+                             timeline(S, segs[i], n),
+                             None if meshes is None else {"faces": meshes["faces"], "gt": meshes["gt"].get(n), "pred": meshes["pred"].get(n)})
         if writer is None:
             cv2.imwrite(os.path.join(check_dir, f"frame_{n:05d}.png"), img[:, :, ::-1])
         else:

@@ -199,6 +199,10 @@ K3 = 1.3  # 3D 패널 확대(px/mm), 두 패널 같다
 V0 = -14.0  # 패널 아래 끝의 세로 값(mm) — 손바닥 틀 x(손목 → 검지 방향)
 H0_B = -125.0  # 앞쪽 패널 왼쪽 끝의 가로 값 h = −y
 H0_C = -70.0  # 옆쪽 패널 왼쪽 끝의 가로 값 h = −z
+PB_M = (376, 84, 276, 320)  # MANO 판: 정답 메시(카메라에서 본 방향)
+PC_M = (668, 84, 276, 320)  # MANO 판: 예측 메시
+MESH_SIDE = 274  # 메시 패널 안 정사각 그림(세로 가운데, 손 영상 패널과 같은 자르기)
+GT_MESH, PRED_MESH = "#bdb6a8", "#6ea0eb"  # 정답·예측 메시 색(예측은 BLUE를 밝게 — 그늘이 보이게)
 STRIP = (16, 462, 928, 104)  # 정보 띠
 TL = (16, 576, 928, 92)  # 오차 시간 띠
 TP = (TL[0] + 70, TL[1] + 30, TL[2] - 70 - 20, 38)  # 시간 띠의 그림 칸(x, y, 폭, 높이)
@@ -221,8 +225,10 @@ def panel_points(mm, panel, h0, view):
     return np.stack([to_panel(a, b, panel, h0) for a, b in zip(hh, vv)]) - np.array((panel[0] + 1, panel[1] + 1))
 
 
-def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None):
-    """영상 내내 같은 배경(제목·범례·패널 틀·격자·평균 자세·설명·띠 바탕)을 한 번 그린다. RGB numpy."""
+def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False):
+    """영상 내내 같은 배경(제목·범례·패널 틀·격자·평균 자세·설명·띠 바탕)을 한 번 그린다. RGB numpy. mano면 3D 뼈대 대신 메시 패널 둘."""
+    if mano:
+        mean_mm = None  # 메시 판에는 3D 뼈대 패널이 없다
     img = Image.new("RGB", (CW, CH), rgb(SURFACE))
     d = ImageDraw.Draw(img)
     text(d, (16, 24), title, 22, INK, bold=True)
@@ -239,9 +245,12 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None):
         text(d, (lx + 38, 24), label, 13, INK2)
         lx += wd + 20
     text(d, (PA[0], 72), "손 영상 위 겹쳐 보기(근사)" if video else "화면 좌표 뼈대(영상 없음, 근사)", 14, INK, bold=True)
-    text(d, (PB[0], 72), "앞쪽 — 손등 쪽에서 본 모습", 14, INK, bold=True)
-    text(d, (PC[0], 72), "옆쪽 — 엄지 쪽에서 본 모습", 14, INK, bold=True)
-    for panel, h0, view in ((PB, H0_B, "front"), (PC, H0_C, "side")):
+    if mano:
+        text(d, (PB_M[0], 72), "정답 MANO — MediaPipe 관절에 맞춤", 14, INK, bold=True)
+        text(d, (PC_M[0], 72), "예측 MANO — FastViT 관절에 맞춤", 14, INK, bold=True)
+        for x0, y0, w, h in (PB_M, PC_M):
+            d.rectangle([x0, y0, x0 + w, y0 + h], fill=(255, 255, 255), outline=rgb(BASE))
+    for panel, h0, view in () if mano else ((PB, H0_B, "front"), (PC, H0_C, "side")):
         x0, y0, w, h = panel
         d.rectangle([x0, y0, x0 + w, y0 + h], fill=(255, 255, 255), outline=rgb(BASE))
         for v in range(0, 251, 50):  # 격자 50 mm
@@ -348,11 +357,47 @@ def draw_timeline(canvas, tl, ymax):
     return a, b
 
 
-def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None):
+def mesh_image(S, n, verts_mm):
+    """손바닥 틀 메시 (V, 3) mm → (영상 픽셀 (V, 2), 깊이 (V,) 영상 px 단위). 손 방향·위치·크기는 그 프레임 정답으로 되돌리고(pred_world와 같은 식),
+    world → 영상은 정답 21점의 닮음 맞춤을 그대로 쓴다. 깊이는 MediaPipe world z(클수록 카메라에서 멂)."""
+    unit = verts_mm / S["L_mm"]
+    w = joints.to_left((S["rot"][n].T @ (unit * S["Lm"][n]).T).T + S["real"][n, 0], S["hand"])
+    A, sm, dm = fit_similarity(S["world"][n][:, :2], S["img_px"][n])
+    return (w[:, :2] - sm) @ A.T + dm, w[:, 2] * np.sqrt(abs(np.linalg.det(A)))
+
+
+def draw_mesh(img, pts, depth, faces, color):
+    """메시를 칠한다(화가 알고리즘: 먼 면부터). 밝기는 면 법선과 시선의 각(양면). pts (V, 2)·depth (V,)는 같은 px 단위, color는 img와 같은 순서."""
+    p3 = np.column_stack([pts, depth])
+    a, b, c = p3[faces[:, 0]], p3[faces[:, 1]], p3[faces[:, 2]]
+    nrm = np.cross(b - a, c - a)
+    shade = 0.30 + 0.70 * np.abs(nrm[:, 2]) / (np.linalg.norm(nrm, axis=1) + 1e-12)
+    tri = np.round(pts[faces] * (1 << SH)).astype(np.int32)
+    col = np.asarray(color, dtype=np.float64)
+    for f in np.argsort(-(a[:, 2] + b[:, 2] + c[:, 2])):
+        cv2.fillConvexPoly(img, tri[f], (col * shade[f]).tolist(), cv2.LINE_8, SH)
+
+
+def mesh_panel(canvas, panel, S, n, verts_mm, faces, color):
+    """메시 패널 하나: 손 영상 패널과 같은 자르기로 2배 그린 뒤 줄여 붙인다(verts_mm이 None이면 빈 패널)."""
+    x0, y0, w, h = panel
+    side = MESH_SIDE * SS
+    buf = np.full((side, side, 3), 255, np.uint8)
+    if verts_mm is not None:
+        px, depth = mesh_image(S, n, verts_mm)
+        if np.isfinite(px).all() and np.isfinite(depth).all():
+            M = crop_matrix(S["crop_c"][n], S["crop_side"][n], side)
+            draw_mesh(buf, px @ M[:, :2].T + M[:, 2], depth * M[0, 0], faces, rgb(color))
+    oy = y0 + (h - MESH_SIDE) // 2
+    canvas[oy: oy + MESH_SIDE, x0 + 1: x0 + 1 + MESH_SIDE] = cv2.resize(buf, (MESH_SIDE, MESH_SIDE), interpolation=cv2.INTER_AREA)
+
+
+def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
     """한 장(RGB). frame_bgr = 영상 프레임(None이면 영상 없는 판: 어두운 바탕에 화면 좌표 뼈대).
     info: dict(pred=(20, 3)|None, err, prompt, kind, edge, time, tag, tag_color, tag_note, seg_text, meanpose).
     seg: None이면 손 영상 전체. dict(alpha=uint8(분할 해상도)|None)이면 손만 보이는 판 — alpha가 None이면(랜드마크 없음) 원본 프레임을 쓰지 않고
-    어두운 빈 패널. tl: 시간 띠(draw_timeline의 dict) 또는 None."""
+    어두운 빈 패널. tl: 시간 띠(draw_timeline의 dict) 또는 None. mano: None이면 3D 뼈대 두 시점, dict(faces, gt=(정점 mm, 잔차)|None,
+    pred=(정점 mm, 잔차)|None)이면 정답·예측 MANO 메시(static_background(mano=True)와 함께)."""
     canvas = bg.copy()
     has_hand = bool(np.isfinite(S["img_px"][n]).all())
     hidden = seg is not None and seg.get("alpha") is None
@@ -377,7 +422,10 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None):
     gt_mm = S["unit"][n] * L  # (21, 3) 손목(원점) 포함
     gt_ok = bool(np.isfinite(gt_mm).all())
     pr_mm = None if info["pred"] is None else np.vstack([np.zeros((1, 3)), info["pred"] * L])
-    for panel, h0, view in ((PB, H0_B, "front"), (PC, H0_C, "side")):
+    if mano is not None:
+        for panel, key, color in ((PB_M, "gt", GT_MESH), (PC_M, "pred", PRED_MESH)):
+            mesh_panel(canvas, panel, S, n, None if mano[key] is None else mano[key][0], mano["faces"], color)
+    for panel, h0, view in () if mano is not None else ((PB, H0_B, "front"), (PC, H0_C, "side")):
         x0, y0, w, h = panel
         sub = canvas[y0 + 1: y0 + h, x0 + 1: x0 + w]  # 패널 안쪽만 칠한다(바깥은 잘림)
         pg = panel_points(gt_mm, panel, h0, view) if gt_ok else None
@@ -394,6 +442,12 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None):
     d = ImageDraw.Draw(img)
     if not has_hand or hidden:
         text(d, (PA[0] + PA[2] / 2, PA[1] + PA[3] / 2), "손 없음", 24, "#a3a29b", bold=True, anchor="mm")
+    if mano is not None:
+        for (x0, y0, w, h), key, empty in ((PB_M, "gt", "정답 없음"), (PC_M, "pred", "예측 없음")):
+            if mano[key] is None:
+                text(d, (x0 + w / 2, y0 + h / 2), empty, 18, "#a3a29b", bold=True, anchor="mm")
+            else:
+                text(d, (x0 + 8, y0 + h - 11), f"맞춤 잔차 {mano[key][1]:.1f} mm", 11, MUTED)
     x, y, w, h = STRIP
     text(d, (x + 16, y + 20), "동작", 12, MUTED)
     name = info["prompt"]

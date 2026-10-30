@@ -95,6 +95,23 @@ class RenderTest(unittest.TestCase):
         card = D.card_image("제목", "부제", "시험 블록 0", "세션 0–10 s", ["줄 하나", "12.3 mm", "참고"], "1 / 4")
         self.assertEqual(card.shape, (D.CH, D.CW, 3))
 
+    def test_mano_panels_show_the_predicted_mesh_in_blue(self):
+        bg = D.static_background("제목", "부제", ("설명 하나", "설명 둘"), 40.0, mano=True)
+        verts = joints.with_wrist(self.y[:1])[0] * self.S["L_mm"]  # 관절 21점을 정점으로 쓰는 작은 '메시'(손바닥 삼각형 몇 개)
+        faces = np.array([[0, 5, 17], [5, 9, 13], [9, 13, 17], [0, 1, 2]])
+
+        def blue(img, panel):
+            x0, y0, w, h = panel
+            p = img[y0: y0 + h, x0: x0 + w].astype(int)
+            return int(((p[..., 2] > 150) & (p[..., 0] < 120)).sum())
+
+        img = D.render_frame(self.S, bg, 0, self.frame, self.info, None, self.tl, {"faces": faces, "gt": (verts, 2.0), "pred": (verts, 4.0)})
+        self.assertEqual(img.shape, (D.CH, D.CW, 3))
+        self.assertGreater(blue(img, D.PC_M), 200)
+        self.assertEqual(blue(img, D.PB_M), 0)  # 정답 메시는 회색
+        img = D.render_frame(self.S, bg, 0, self.frame, self.info, None, self.tl, {"faces": faces, "gt": None, "pred": None})
+        self.assertEqual(blue(img, D.PC_M), 0)
+
     def test_hand_only_view_never_shows_the_frame_outside_the_alpha(self):
         def green(img):  # 영상의 초록(RGB)이 남은 픽셀 수 — 흰 정답 선·파란 예측은 세지 않는다
             p = self.panel(img).astype(int)

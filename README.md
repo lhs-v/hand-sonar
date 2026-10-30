@@ -11,7 +11,7 @@
 | `wear/` | 워치 앱. 18–21 kHz 처프(600 샘플, 48 kHz)를 계속 내면서 마이크를 녹음합니다. 1분 조각 WAV와 기록(`rec.json`), 가속도·자이로·지자기·중력 기록(`sensors-NNN.csv`)을 남기고, 녹음이 멈추면 블루투스로 폰에 넘깁니다. |
 | `mobile/` | 폰 앱. 정면 카메라와 MediaPipe Hand Landmarker로 손 관절 21점을 프레임마다 적고(`landmarks.csv`), 같은 프레임을 영상(`video.mp4`)으로 남깁니다. 안내 동작(손가락 굽히기, ASL 숫자, 손목, 자유 동작)을 시간표대로 띄우고(`prompts.csv`), 세션 시작과 끝에 표지음을 냅니다. 폰 센서(`phone_sensors-NNN.csv`)와 세션 정보도 적습니다. 워치가 넘긴 녹음을 받아 두고, 기록 화면에서 zip으로 내보냅니다. |
 | `shared/` | 두 앱이 같이 쓰는 순수 Kotlin 코드입니다(처프·표지음 규격, 검출기, 파일 형식, 세션 진행). JVM 시험이 있습니다. |
-| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`), 학습 결과 영상(`render_video.py`·`render_draw.py`·`hand_seg.py`), 데이터 묶음 만들기·되돌리기(`export_data.py`·`unpack_data.py`). 실험 스크립트(`experiments/`: 공개 데이터를 우리 형식으로, 공개 모델 전이, 학습 방법 바꾸기)도 있습니다. |
+| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`), 학습 결과 영상(`render_video.py`·`render_draw.py`·`hand_seg.py`·`mano.py`), 데이터 묶음 만들기·되돌리기(`export_data.py`·`unpack_data.py`). 실험 스크립트(`experiments/`: 공개 데이터를 우리 형식으로, 공개 모델 전이, 학습 방법 바꾸기)도 있습니다. |
 | `data/` | 모은 세션 10개의 손 관절과 에코 프로파일, 그것을 맞추는 기록(영상·원본 소리·센서 제외, [data/README.md](data/README.md)). |
 
 ## 두 기기 시간 맞추기
@@ -110,6 +110,7 @@ handsonar.keyPassword=android
    - 한 화면: 손 영상 위 겹쳐 보기(정답 = 흰 선, 예측 = 파란 띠), 손바닥 틀 3D 두 시점(정답·예측·학습 평균 자세), 동작·MPJPE·역할 꼬리표, 오차 시간 띠(모델과 평균 자세 상수, 커서 = 지금 프레임).
    - 나누기는 그 실행의 `metrics.json`대로 다시 만들고, 기본(`--frames test`)은 시험 프레임만 그립니다(블록 나누기는 시험 블록마다 제목 카드). 예측은 그 세션의 창을 다시 만들어 `model.pt`로 냅니다.
    - `--seg`는 손만 남기고(랜드마크 마스크 + GrabCut) 배경·얼굴을 가립니다. 영상이 없으면(데이터 묶음만 받은 PC 등) 화면 좌표 뼈대로 그립니다(`--no-video`). 공개 데이터 변환은 `--video`로 원본 mp4를 줍니다. `--check N`은 영상 대신 PNG N장입니다.
+   - `--mano <MANO_LEFT.pkl>`은 3D 뼈대 대신 정답·예측 관절에 맞춘 MANO 손 메시를 그립니다(프레임마다 맞춤, 평활 없음, 맞춤 잔차 표시). MANO 모델은 https://mano.is.tue.mpg.de 에 등록하고 받으며(비상업 연구용 라이선스) 저장소에 넣지 않습니다.
    - opencv-python·Pillow·imageio-ffmpeg(없으면 PATH의 ffmpeg)와 한글 글꼴(못 찾으면 `--font`)이 필요합니다. 얼굴이 찍힌 영상에서 만들므로 출력은 저장소 밖에만 씁니다.
 
 ## 설치와 사용
