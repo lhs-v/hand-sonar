@@ -26,6 +26,7 @@ import java.io.File
  * 이벤트 시각을 그 바닥만큼 옮겨 쓴다).
  * 세션을 방해하지 않게: 시작·정지는 예외를 내지 않고 문제를 [report]에 남기며, 기기에 없는 센서는 건너뛴다.
  * [start]는 주 스레드에서, [stop]은 아무 스레드에서 한 번씩 부른다. 워치 앱 `wear.record.SensorRecorder`와 같은 틀이다(두 앱이 함께 쓰는 안드로이드 모듈은 없다).
+ * 마지막 가속도 값은 [latestAccel]로 읽는다(폰은 세워 두므로 중력과 같다 — 기준 자세에서 그림 속 수직선을 정한다).
  */
 class SensorRecorder(context: Context, dir: File, base: String, private val specs: List<SensorSpec>) {
     private val manager: SensorManager? = context.getSystemService(SensorManager::class.java)
@@ -39,6 +40,10 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
     @Volatile private var missing: List<SensorKind> = emptyList()
     @Volatile private var problem: String? = null
 
+    /** 가장 최근 가속도 값(m/s², 기기 축). 아직 없으면 null. */
+    @Volatile var latestAccel: FloatArray? = null
+        private set
+
     private val listener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             try {
@@ -46,6 +51,7 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
                 val type = event.sensor?.type ?: return
                 val kind = kinds[type] ?: return
                 writer.add(kind, event.timestamp, received, event.values, event.accuracy)
+                if (kind == SensorKind.ACCEL && event.values.size >= 3) latestAccel = event.values.copyOf(3)
             } catch (e: Exception) { // 센서 스레드에서 예외가 새면 앱과 함께 소리 녹음이 멈춘다(검토 M6): 한 번 적고 넘긴다
                 if (problem == null) problem = "센서 이벤트 오류: ${e.message ?: e.javaClass.simpleName}"
             }

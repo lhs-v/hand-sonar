@@ -34,6 +34,7 @@ import com.watchpose.handsonar.wear.BuildConfig
 import com.watchpose.handsonar.wear.HandSonarApp
 import com.watchpose.handsonar.wear.Haptics
 import com.watchpose.handsonar.wear.R
+import com.watchpose.handsonar.wear.transfer.TiltSender
 import com.watchpose.handsonar.wear.transfer.TransferService
 import com.watchpose.handsonar.wear.ui.MainActivity
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +65,8 @@ import java.util.Locale
  * 센서 기록(전송 설계 §8, 계획 6): 녹음·재생을 다 연 뒤에 [SensorRecorder]를 시작하고(소리 녹음을 방해하지 않게), 멈출 때 정지 시각을 잰 뒤
  * 마지막 rec.json과 보내기 전에 닫는다(보내기는 다 닫힌 파일만 옮긴다). 센서 기록이 실패해도 녹음은 이어 간다.
  * 원격 시작에 `sensors` false를 주면 그 녹음만 센서를 듣지 않는다(센서 기록이 소리에 주는 영향을 견줄 때).
+ * 기울기 보내기: 센서를 듣는 녹음이면 [TiltSender]가 마지막 중력 값을 0.2 s마다 폰으로 보낸다(폰의 기준 자세 판정, shared `TiltMessage`).
+ * 멈출 때 맨 먼저 그친다. 폰을 못 찾아도 녹음은 그대로다.
  */
 class RecorderService : LifecycleService() {
     private var wakeLock: PowerManager.WakeLock? = null
@@ -89,6 +92,7 @@ class RecorderService : LifecycleService() {
     }
 
     private var ticker: Job? = null
+    private var tilt: Job? = null // 폰으로 기울기 보내기(기준 자세 판정, shared TiltMessage)
     private val haptics by lazy { Haptics(this) }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -203,6 +207,8 @@ class RecorderService : LifecycleService() {
         }
         // 센서는 소리가 다 열린 뒤에 듣는다(소리 녹음을 방해하지 않게). 못 열어도 녹음은 이어 가고 rec.json·화면에 남긴다.
         if (withSensors) sensors = SensorRecorder(this, dir, SensorPlan.WATCH_BASE, SensorPlan.WATCH).also { it.start() }
+        // 폰이 기준 자세에서 팔뚝이 섰는지 보도록 중력 값을 보낸다(녹음과 따로 돌고, 실패해도 녹음은 이어 간다)
+        sensors?.let { s -> tilt = lifecycleScope.launch(Dispatchers.Default) { TiltSender(this@RecorderService).run { s.latestGravity } } }
         writeLog()
         val autoStopMinutes = autoStopOverride ?: settings.autoStopMinutes
         autoStopAtMs = if (autoStopMinutes > 0) startedAt.elapsedNs / 1_000_000 + autoStopMinutes * 60_000L else 0L
@@ -344,6 +350,8 @@ class RecorderService : LifecycleService() {
         finished = true
         ticker?.cancel()
         ticker = null
+        tilt?.cancel()
+        tilt = null
         // 정지 단계마다 예외를 따로 받는다(검토 M6): 한 단계가 던져도 볼륨 되돌리기·rec.json·보내기·포그라운드 내려놓기까지 간다.
         runCatching { recorder?.stop() }
         runCatching { player?.stop() }
@@ -376,6 +384,8 @@ class RecorderService : LifecycleService() {
     /** 녹음을 열지 못했을 때: 남길 것이 없으므로 빈 폴더를 지우고 멈춘다. */
     private fun failToStart(message: String) {
         finished = true
+        tilt?.cancel() // 센서를 연 뒤에만 시작하므로 보통 없다
+        tilt = null
         runCatching { recorder?.stop() } // 단계마다 예외를 따로 받는다(검토 M6, finish와 같다)
         runCatching { writer?.close() }
         runCatching { sensors?.stop() } // 센서는 재생까지 연 뒤에 시작하므로 보통 없다

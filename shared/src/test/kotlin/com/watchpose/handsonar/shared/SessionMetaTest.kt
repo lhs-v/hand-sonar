@@ -33,7 +33,7 @@ class SessionMetaTest {
     fun startOfSessionHasNullEndAndStats() {
         val json = meta(stats = null, endWallMs = null).toJson()
         assertTrue(json.startsWith("{\"format\":1,\"app\":\"0.1.0\",\"device\":\"samsung SM-F971N\",\"android\":\"17 (API 37)\",\"camera\":{\"id\":\"3\",\"display\":\"inner\""), json)
-        assertTrue(json.contains("\"measuredFps\":null},\"hand\":\"left\",\"start\""), json) // camera가 measuredFps로 끝나고 hand·start가 이어짐
+        assertTrue(json.contains("\"measuredFps\":null,\"displayRotation\":null},\"hand\":\"left\",\"start\""), json) // camera가 displayRotation으로 끝나고 hand·start가 이어짐
         assertTrue(json.contains("\"start\":{\"wallMs\":1000,\"elapsedNs\":2000},\"end\":null"), json)
         assertTrue(json.contains("\"stats\":null"), json)
         assertTrue(json.contains("\"status\":\"kept\",\"flags\":[\"suspect-hand\"],\"memo\":\"\""), json)
@@ -47,10 +47,10 @@ class SessionMetaTest {
         val base = meta(stats = null, endWallMs = null)
         // 안 준 경우(기존 시험의 CameraMeta): 두 칸이 null로 camera 맨 끝에 적힌다
         val unset = base.toJson()
-        assertTrue(unset.contains("\"rotation\":270,\"delegate\":null,\"measuredFps\":null}"), unset)
+        assertTrue(unset.contains("\"rotation\":270,\"delegate\":null,\"measuredFps\":null,\"displayRotation\":null}"), unset)
         // 준 경우
-        val given = base.copy(camera = base.camera?.copy(delegate = "GPU", measuredFps = 29.5)).toJson()
-        assertTrue(given.contains("\"rotation\":270,\"delegate\":\"GPU\",\"measuredFps\":29.5}"), given)
+        val given = base.copy(camera = base.camera?.copy(delegate = "GPU", measuredFps = 29.5, displayRotation = 1)).toJson()
+        assertTrue(given.contains("\"rotation\":270,\"delegate\":\"GPU\",\"measuredFps\":29.5,\"displayRotation\":1}"), given)
     }
 
     @Test
@@ -84,7 +84,7 @@ class SessionMetaTest {
         // 고르지 않은 세션 정보는 null, 시작 때 쓴 meta에는 센서 보고가 없다
         val unset = base.toJson()
         assertTrue(
-            unset.contains("\"rewear\":false,\"context\":{\"place\":null,\"posture\":null,\"armSupport\":null,\"strap\":null},\"sensors\":null,\"video\":"),
+            unset.contains("\"rewear\":false,\"context\":{\"place\":null,\"posture\":null,\"armSupport\":null,\"strap\":null},\"sensors\":null,\"calibration\":null,\"video\":"),
             unset,
         )
         val report = SensorReport(emptyList(), listOf(SensorKind.LIGHT), listOf(SensorPart("phone_sensors-000.csv", 3)), mapOf(SensorKind.ACCEL to 3L), null)
@@ -97,9 +97,18 @@ class SessionMetaTest {
             given.contains(
                 "\"rewear\":true,\"context\":{\"place\":\"집\",\"posture\":\"sitting\",\"armSupport\":\"desk\",\"strap\":\"normal\"}," +
                     "\"sensors\":{\"columns\":\"t_ns,recv_ns,sensor,x,y,z,accuracy\",\"list\":[],\"missing\":[\"light\"],\"others\":[]," +
-                    "\"parts\":[{\"file\":\"phone_sensors-000.csv\",\"rows\":3}],\"counts\":{\"acc\":3},\"error\":null},\"video\":",
+                    "\"parts\":[{\"file\":\"phone_sensors-000.csv\",\"rows\":3}],\"counts\":{\"acc\":3},\"error\":null},\"calibration\":null,\"video\":",
             ),
             given,
+        )
+    }
+
+    @Test
+    fun calibrationComesAfterSensors() {
+        val json = meta(stats = null, endWallMs = null).copy(calibration = CalibrationMeta("ok", "hand+forearm", 3.5, null, 2_100)).toJson()
+        assertTrue(
+            json.contains("\"sensors\":null,\"calibration\":{\"result\":\"ok\",\"checks\":\"hand+forearm\",\"handDeg\":3.5,\"forearmDeg\":null,\"holdMs\":2100},\"video\":"),
+            json,
         )
     }
 

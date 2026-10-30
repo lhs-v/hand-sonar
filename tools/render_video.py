@@ -111,10 +111,10 @@ def predict_session(data, run, saved, k):
     if "bins" in ck and (list(ck["bins"]) != [dataset.BINS.start, dataset.BINS.stop] or int(ck["window"]) != dataset.WINDOW):
         raise ValueError(f"model.pt 입력(칸 {ck['bins']}, 창 {ck['window']}줄)이 지금 dataset(칸 {dataset.BINS.start}–{dataset.BINS.stop}, {dataset.WINDOW}줄)과 다름")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = train.make_model()
+    model = train.make_model(int(ck.get("num_classes", train.FINGER_OUT)))  # --wrist로 학습한 모델은 손목 3값이 뒤에 붙는다
     model.load_state_dict(ck["state_dict"])
     model.to(device)
-    pred = train.predict(model, torch.as_tensor(part["x"], device=device), np.arange(len(part["y"])))
+    pred = train.predict(model, torch.as_tensor(part["x"], device=device), np.arange(len(part["y"])))[:, :train.FINGER_OUT]
     return pred.reshape(-1, 20, 3).astype(np.float64), part["y"].reshape(-1, 20, 3).astype(np.float64), device
 
 

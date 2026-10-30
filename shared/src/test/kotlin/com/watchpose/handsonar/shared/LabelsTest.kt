@@ -17,6 +17,13 @@ class LabelsTest {
     }
 
     @Test
+    fun specialIdsDoNotCollide() {
+        assertEquals(listOf("free", "pause", "neutral"), listOf(Labels.FREE_ID, Labels.PAUSE_ID, Labels.NEUTRAL_ID).map { Labels.byId(it).key })
+        assertEquals(3, setOf(Labels.FREE_ID, Labels.PAUSE_ID, Labels.NEUTRAL_ID).size)
+        assertEquals(WristPose.NEUTRAL, Labels.NEUTRAL.shape.wrist)
+    }
+
+    @Test
     fun fingerFlexBendsOnlyThatFinger() {
         for (id in Labels.FINGERS) {
             val f = Labels.byId(id).shape.fingers

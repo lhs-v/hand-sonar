@@ -2,6 +2,7 @@ package com.watchpose.handsonar.shared
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SessionRunnerTest {
@@ -32,6 +33,69 @@ class SessionRunnerTest {
         assertEquals((0 until 72).toList(), r.records.map { it.index })
         assertEquals(Labels.byId(first.classId).name, first.name)
         assertEquals(1f, r.progress(1_000 * s))
+    }
+
+    @Test
+    fun calibrationWaitsForTheGateAndRecordsTheHold() {
+        val r = SessionRunner(plan, calibrate = true)
+        r.start(0)
+        assertEquals(listOf<RunnerEvent>(RunnerEvent.CalibrationStarted), r.tick(1 * s))
+        assertEquals(RunnerPhase.CALIB, r.phase)
+        assertTrue(r.calibrating)
+        assertTrue(r.tick(60 * s).isEmpty()) // 시간으로 끝나지 않는다
+        assertEquals(RunnerPhase.CALIB, r.phase)
+        assertEquals(0.0f, r.progress(60 * s), 0.01f) // 기준 자세 시간은 진행률에 넣지 않는다(시작 1 s만)
+        assertEquals(listOf<RunnerEvent>(RunnerEvent.PromptStarted(0)), r.calibrated(holdStartNs = 0, nowNs = 63 * s))
+        assertEquals(RunnerPhase.PROMPT, r.phase)
+        val calib = r.records.single()
+        assertEquals(Labels.NEUTRAL_ID, calib.classId)
+        assertEquals(Triple(1 * s, 63 * s, ""), Triple(calib.startNs, calib.endNs, calib.flag)) // 유지 시작은 단계 시작보다 앞일 수 없다
+        val events = r.tick(1_000 * s)
+        assertEquals(RunnerEvent.Finished, events.last())
+        assertEquals(73, r.records.size)
+        assertEquals((0 until 73).toList(), r.records.map { it.index })
+        assertEquals(Pair(63 * s, 65 * s), Pair(r.records[1].startNs, r.records[1].endNs)) // 첫 동작은 기준 자세가 끝난 63 s부터 2 s
+        assertEquals(156_800_000_000L + 62 * s, r.endNs) // 기준 자세 62 s만큼 늦게 끝난다
+    }
+
+    @Test
+    fun skippedCalibrationIsRecordedWholeAndPauseRestartsIt() {
+        val r = SessionRunner(plan, calibrate = true)
+        r.start(0)
+        r.tick(1 * s)
+        r.pause(4 * s)
+        assertTrue(r.calibrating)
+        assertEquals(-1, r.resumePrompt)
+        assertEquals(listOf<RunnerEvent>(RunnerEvent.CalibrationStarted), r.resume(10 * s))
+        assertEquals(RunnerPhase.CALIB, r.phase)
+        assertEquals(listOf<RunnerEvent>(RunnerEvent.PromptStarted(0)), r.skipCalibration(15 * s))
+        val pause = r.records[0]
+        val skip = r.records[1]
+        assertEquals(Triple(Labels.PAUSE_ID, 4 * s, 10 * s), Triple(pause.classId, pause.startNs, pause.endNs))
+        assertEquals(Triple(Labels.NEUTRAL_ID, 10 * s, 15 * s), Triple(skip.classId, skip.startNs, skip.endNs)) // 다시 시작한 단계 전체
+        assertEquals(SessionRunner.FLAG_SKIP, skip.flag)
+        assertTrue(r.skipCalibration(16 * s).isEmpty()) // CALIB가 아니면 아무것도 하지 않는다
+        assertTrue(r.calibrated(0, 16 * s).isEmpty())
+    }
+
+    @Test
+    fun holdStartBeforeARestartedCalibrationIsClipped() {
+        val r = SessionRunner(plan, calibrate = true)
+        r.start(0)
+        r.tick(1 * s)
+        r.pause(2 * s)
+        r.resume(5 * s)
+        r.calibrated(holdStartNs = 3 * s, nowNs = 8 * s)
+        val calib = r.records.last { it.classId == Labels.NEUTRAL_ID }
+        assertEquals(Pair(5 * s, 8 * s), Pair(calib.startNs, calib.endNs))
+    }
+
+    @Test
+    fun withoutCalibrationLeadGoesStraightToTheFirstPrompt() {
+        val r = SessionRunner(plan)
+        r.start(0)
+        assertEquals(listOf<RunnerEvent>(RunnerEvent.PromptStarted(0)), r.tick(1 * s))
+        assertFalse(r.calibrating)
     }
 
     @Test

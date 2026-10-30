@@ -13,6 +13,7 @@ import com.watchpose.handsonar.shared.SensorInfo
 import com.watchpose.handsonar.shared.SensorKind
 import com.watchpose.handsonar.shared.SensorReport
 import com.watchpose.handsonar.shared.SensorSpec
+import com.watchpose.handsonar.shared.Tilt
 import java.io.File
 
 /**
@@ -25,6 +26,7 @@ import java.io.File
  * 이벤트 시각을 그 바닥만큼 옮겨 쓴다).
  * 소리 녹음을 방해하지 않게: 시작·정지는 예외를 내지 않고 문제를 [report]·[note]에 남기며, 기기에 없는 센서는 건너뛴다.
  * [start]·[stop]은 주 스레드에서 한 번씩 부른다. 폰 앱 `mobile.session.SensorRecorder`와 같은 틀이다(두 앱이 함께 쓰는 안드로이드 모듈은 없다).
+ * 마지막 중력 값은 [latestGravity]로 읽는다(녹음 서비스가 폰의 기준 자세 판정에 보낸다, shared `TiltMessage`).
  */
 class SensorRecorder(context: Context, dir: File, base: String, private val specs: List<SensorSpec>) {
     private val manager: SensorManager? = context.getSystemService(SensorManager::class.java)
@@ -38,6 +40,10 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
     @Volatile private var missing: List<SensorKind> = emptyList()
     @Volatile private var problem: String? = null
 
+    /** 가장 최근 중력 이벤트(이벤트 시각, 값). 아직 없으면 null. */
+    @Volatile var latestGravity: Tilt? = null
+        private set
+
     private val listener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             try {
@@ -45,6 +51,7 @@ class SensorRecorder(context: Context, dir: File, base: String, private val spec
                 val type = event.sensor?.type ?: return
                 val kind = kinds[type] ?: return
                 writer.add(kind, event.timestamp, received, event.values, event.accuracy)
+                if (kind == SensorKind.GRAVITY && event.values.size >= 3) latestGravity = Tilt(event.timestamp, event.values[0], event.values[1], event.values[2])
             } catch (e: Exception) { // 센서 스레드에서 예외가 새면 앱과 함께 소리 녹음이 멈춘다(검토 M6): 한 번 적고 넘긴다
                 if (problem == null) problem = "센서 이벤트 오류: ${e.message ?: e.javaClass.simpleName}"
             }

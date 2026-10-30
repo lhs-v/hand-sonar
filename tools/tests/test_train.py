@@ -43,6 +43,51 @@ class VelocityLossTest(unittest.TestCase):
             np.testing.assert_array_equal(np.diff(t[idx])[pair], 50_000_000)  # 이웃 쌍은 늘 바로 다음 프레임
 
 
+class WristTest(unittest.TestCase):
+    def test_depth_error_counts_a_quarter_and_frames_without_truth_are_ignored(self):
+        u = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        d = torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, 1.0]])
+        pred = torch.tensor([[1.0, 0.0, 0.2], [1.0, 0.2, 0.0]])  # 첫째는 깊이 쪽 0.2, 둘째는 그림 평면 쪽 0.2 틀림
+        self.assertAlmostEqual((train.DEPTH_WEIGHT * 0.04 + 0.04) / 2, float(train.wrist_loss(pred, u, d, torch.tensor([1.0, 1.0]))), places=6)
+        self.assertAlmostEqual(train.DEPTH_WEIGHT * 0.04, float(train.wrist_loss(pred, u, d, torch.tensor([1.0, 0.0]))), places=6)
+        self.assertEqual(0.0, float(train.wrist_loss(pred, u, d, torch.tensor([0.0, 0.0]))))  # 정답이 없으면 0
+
+    def test_loss_fn_adds_the_wrist_term_only_when_weighted(self):
+        pred = torch.zeros(4, 63)
+        true = torch.zeros(4, 67)
+        true[:, 60] = 1.0  # u = (1, 0, 0)
+        true[:, 65] = 1.0  # 깊이 축 = (0, 0, 1)
+        true[:, 66] = 1.0  # 정답 있음
+        pair = torch.tensor([True, True, True])
+        self.assertEqual(0.0, float(train.loss_fn(pred, true, pair)))  # 손가락 60값만 본다
+        self.assertAlmostEqual(0.5, float(train.loss_fn(pred, true, pair, wrist_weight=0.5)), places=6)  # 그림 평면 오차 1 × 무게 0.5
+
+    def test_model_outputs_follow_the_head_size(self):
+        model = train.make_model(train.FINGER_OUT + train.WRIST_OUT)
+        x = torch.zeros(2, 2, 96, 60)
+        self.assertEqual((2, 63), tuple(train.predict(model, x, np.arange(2)).shape))
+        self.assertEqual((0, 63), train.predict(model, x, np.arange(0)).shape)
+
+    def test_wrist_metrics_compare_against_the_training_mean_direction(self):
+        rng = np.random.default_rng(4)
+        n = 200
+        ang = rng.uniform(-0.6, 0.6, size=n)
+        u = np.stack([np.cos(ang), np.sin(ang) * 0.5, np.sin(ang)], axis=1)
+        u /= np.linalg.norm(u, axis=1, keepdims=True)
+        depth = np.tile([0.0, 0.0, 1.0], (n, 1))
+        ok = np.ones(n, dtype=bool)
+        ok[150:160] = False
+        ds = {"wrist": u.astype(np.float32), "wrist_depth": depth.astype(np.float32), "wrist_ok": ok}
+        train_idx, test_idx = np.arange(100), np.arange(100, n)
+        m = train.wrist_metrics(ds, u * 3.0, train_idx, test_idx)  # 길이가 달라도 방향만 본다
+        self.assertEqual({"train": 100, "test": 90}, m["frames"])
+        self.assertLess(m["angleDeg"]["model"]["median"], 1e-3)
+        self.assertGreater(m["angleDeg"]["meanDirection"]["median"], 5.0)
+        self.assertAlmostEqual(1.0, m["slope"]["extension"], places=6)
+        empty = train.wrist_metrics(dict(ds, wrist_ok=np.zeros(n, dtype=bool)), u, train_idx, test_idx)
+        self.assertEqual({"frames": {"train": 0, "test": 0}}, empty)
+
+
 class AugmentTest(unittest.TestCase):
     def setUp(self):
         self.segs = [np.arange(0, 150), np.arange(150, 260)]

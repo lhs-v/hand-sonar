@@ -1,8 +1,8 @@
 """FastViT-T12로 에코 창에서 손 관절 20점을 회귀하고 평가한다(손 소나 계획 4, 학습 설계 §4·§5).
 
     python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 100]
-                             [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--shift 5] [--mask] [--save-x]
-                             [세션 …]
+                             [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--shift 5] [--mask] [--wrist 0.1]
+                             [--save-x] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
   report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다. dataset.npz는 기본으로 창 x 없이 row·목표·라벨·입력 지문만 쓴다(--save-x면 창도).
@@ -16,6 +16,11 @@
   가리기(표준화 뒤 0)를 한다. 한 묶음은 같은 이동·가리기를 쓴다(1.2 s 동안 착용 위치는 그대로이고, 속도 손실이 이웃 프레임을 견준다). 논문의
   진폭 0.95–1.05배는 창마다 표준화하므로 효과가 없어 넣지 않았다. 검증·평가는 가운데 60칸(증강 없음)이라 증강 없는 학습과 입력이 같다.
   증강을 끄면 난수 소비가 예전과 같아 같은 명령이 같은 숫자를 낸다.
+- 손목 상태 다중 과제(--wrist W, 2026-10-30): 몸통은 그대로 두고 출력을 63값으로 늘려 뒤 3값이 손목 정답 u(dataset 손목 정답 — 워치
+  축으로 적은 손 방향)를 맞춘다. 손실에 W × 손목 손실을 더한다. 손목 손실은 (예측 − u)를 카메라 깊이 축 d 성분과 그림 평면 성분으로 나눠
+  |평면|² + DEPTH_WEIGHT × 깊이²를 정답이 있는 프레임(wrist_ok)에서 평균한다. MediaPipe 3D의 깊이는 그림 투영에 맞춘 값이라 믿기 어려워 깊이
+  성분을 가볍게 본다. 손가락 계기는 앞 60값으로 그대로 재고, 시험 프레임의 손목 각 오차(모델·학습 평균 방향, 젖힘·꺾임별, 그림 평면 성분)를
+  metrics.json wrist에 더한다. 끄면(기본 0) 예전과 같다.
 - 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs
   (100)와 벽시계 상한 --max-minutes(20분, 그 epoch 뒤 멈춤)를 둔다. 학습·검증 손실이 nan·inf면 이유를 적고 끝 코드 1로 멈춘다.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
@@ -64,6 +69,7 @@ import pairs  # noqa: E402
 import timm  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
+import wrist  # noqa: E402
 
 ARCH = "fastvit_t12"
 LR = 1e-3
@@ -89,6 +95,9 @@ MASK_PROB = 0.8  # 증강한 묶음에서 가리기를 할 확률(논문)
 MASK_ROWS = (5, 15)  # 가리는 시간 폭(줄, 논문)
 MASK_BINS = (5, 10)  # 가리는 거리 폭(칸, 논문)
 GAP_DRAW = 1.0  # 시험 블록을 이어 붙여 그릴 때 블록 사이를 비우는 s
+FINGER_OUT = 60  # 손가락 목표 값 수(점 1–20 × xyz)
+WRIST_OUT = 3  # 손목 목표 값 수(워치 축 손 방향)
+DEPTH_WEIGHT = 0.25  # 손목 손실에서 카메라 깊이 성분의 무게(MediaPipe 깊이는 투영에서 추정한 값이라 가볍게)
 
 
 def velocity_loss(pred, true, pair):
@@ -98,8 +107,22 @@ def velocity_loss(pred, true, pair):
     return ((d ** 2).mean(dim=1) * w).sum() / w.sum().clamp(min=1.0)
 
 
-def loss_fn(pred, true, pair):
-    return F.mse_loss(pred, true) + VELOCITY_WEIGHT * velocity_loss(pred, true, pair)
+def wrist_loss(pred, u, depth, ok):
+    """손목 손실: 프레임마다 e = 예측 − u를 깊이 축 depth 성분 δ와 나머지(그림 평면)로 나눈 |e − δ·depth|² + DEPTH_WEIGHT·δ², ok 프레임 평균.
+    pred·u·depth (B, 3), ok (B,) 0/1."""
+    e = pred - u
+    delta = (e * depth).sum(dim=1, keepdim=True)
+    per = ((e - delta * depth) ** 2).sum(dim=1) + DEPTH_WEIGHT * delta[:, 0] ** 2
+    return (per * ok).sum() / ok.sum().clamp(min=1.0)
+
+
+def loss_fn(pred, true, pair, wrist_weight=0.0):
+    """손가락 MSE + 속도 손실(앞 60값). wrist_weight > 0이면 true는 (B, 67) = 손가락 60 · u 3 · 깊이 축 3 · ok 1이고 손목 손실을 더한다."""
+    f = FINGER_OUT
+    loss = F.mse_loss(pred[:, :f], true[:, :f]) + VELOCITY_WEIGHT * velocity_loss(pred[:, :f], true[:, :f], pair)
+    if wrist_weight > 0:
+        loss = loss + wrist_weight * wrist_loss(pred[:, f: f + 3], true[:, f: f + 3], true[:, f + 3: f + 6], true[:, f + 6])
+    return loss
 
 
 def segments(t_ns, session, index, gap_sec=CHUNK_GAP_SEC):
@@ -198,32 +221,32 @@ def seed_all(seed):
     torch.backends.cudnn.deterministic = True
 
 
-def make_model():
-    return timm.create_model(ARCH, pretrained=False, in_chans=2, num_classes=60)
+def make_model(outputs=FINGER_OUT):
+    return timm.create_model(ARCH, pretrained=False, in_chans=2, num_classes=outputs)
 
 
 def predict(model, x, index):
-    """index 프레임의 예측 (len, 60) float32 numpy(평가 모드)."""
+    """index 프레임의 예측 (len, 출력 수) float32 numpy(평가 모드). 출력은 손가락 60값(--wrist면 뒤에 손목 3값)."""
     model.eval()
     idx = torch.as_tensor(np.asarray(index, dtype=np.int64), device=x.device)
     with torch.no_grad():
         out = [model(x[idx[a: a + EVAL_BLOCK]]).float().cpu() for a in range(0, len(idx), EVAL_BLOCK)]
-    return torch.cat(out).numpy() if out else np.zeros((0, 60), dtype=np.float32)
+    return torch.cat(out).numpy() if out else np.zeros((0, model.num_classes), dtype=np.float32)
 
 
-def eval_loss(model, x, y, segs):
+def eval_loss(model, x, y, segs, wrist_weight=0.0):
     """덩어리들의 손실(평가 모드, 이웃 쌍은 덩어리 안만)."""
     idx = np.concatenate(segs)
     pred = torch.as_tensor(predict(model, x, idx), device=x.device)
-    return float(loss_fn(pred, y[torch.as_tensor(idx, device=x.device)], torch.as_tensor(pairs_of(segs), device=x.device)))
+    return float(loss_fn(pred, y[torch.as_tensor(idx, device=x.device)], torch.as_tensor(pairs_of(segs), device=x.device), wrist_weight))
 
 
-def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES, augment=None):
+def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES, augment=None, wrist_weight=0.0):
     """(가장 좋던 가중치의 모델, 기록, 가장 좋던 epoch, 멈춘 까닭 "patience" | "epochs" | "time"). x (N, 2, 96, 60)·y (N, 60)는 같은 장치의
     텐서. 학습·검증 손실이 유한하지 않으면(nan·inf) 그 자리에서 이유를 담은 FloatingPointError로 멈춘다. augment(Augment)를 주면 학습
-    미니배치만 그것으로 만들고 검증은 x 그대로다."""
+    미니배치만 그것으로 만들고 검증은 x 그대로다. wrist_weight > 0이면 y는 (N, 67)(loss_fn)이고 모델 출력은 63값이다."""
     torch.manual_seed(seed)
-    model = make_model().to(x.device)
+    model = make_model(FINGER_OUT + (WRIST_OUT if wrist_weight > 0 else 0)).to(x.device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     rng = np.random.default_rng(seed)
     best, best_epoch, best_state, history, stopped = float("inf"), 0, None, [], "epochs"
@@ -234,7 +257,7 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MIN
         for idx, pair, lengths in batch_pieces(train_segs, rng):
             i = torch.as_tensor(idx, device=x.device)
             inputs = x[i] if augment is None else augment.batch(i, lengths, rng)
-            loss = loss_fn(model(inputs), y[i], torch.as_tensor(pair, device=x.device))
+            loss = loss_fn(model(inputs), y[i], torch.as_tensor(pair, device=x.device), wrist_weight)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -243,7 +266,7 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MIN
                 raise FloatingPointError(f"epoch {epoch}: 학습 손실이 유한하지 않음({value}) — 창·정답에 nan·inf가 있거나 학습이 발산했다")
             total += value * len(idx)
             count += len(idx)
-        val = eval_loss(model, x, y, val_segs)
+        val = eval_loss(model, x, y, val_segs, wrist_weight)
         if not math.isfinite(val):
             raise FloatingPointError(f"epoch {epoch}: 검증 손실이 유한하지 않음({val}) — 검증 창·정답에 nan·inf가 있거나 학습이 발산했다")
         history.append({"epoch": epoch, "train": total / count, "val": val})
@@ -521,6 +544,49 @@ def figure_pieces(ds, test, block=None):
     return pieces, labels
 
 
+def wrist_metrics(ds, pred, train, test):
+    """시험 프레임의 손목 각 오차(도). pred (N, 3)는 모델의 손목 출력이고 정답이 있는 프레임(wrist_ok)만 잰다. 기준선은 학습 프레임 정답의
+    평균 방향(평균 자세에 해당). angle = 3D 방향 각, imagePlane = 카메라 깊이 축에 수직인 면(그림 평면)에 투영한 방향의 각(믿을 만한 성분),
+    extension·deviation = 손등 쪽 젖힘·새끼 쪽 꺾임 각의 절대 오차, slope = 예측 각을 정답 각에 회귀한 기울기(1 따라감, 0 평균에 붙음)."""
+    ok = ds["wrist_ok"]
+    tr, te = train[ok[train]], test[ok[test]]
+    out = {"frames": {"train": int(len(tr)), "test": int(len(te))}}
+    if len(tr) == 0 or len(te) == 0:
+        return out
+
+    def unit(v):
+        return v / np.clip(np.linalg.norm(v, axis=1, keepdims=True), 1e-9, None)
+
+    def angle(a, b):
+        return np.degrees(np.arccos(np.clip((a * b).sum(axis=1), -1.0, 1.0)))
+
+    def plane(v, d):
+        return unit(v - (v * d).sum(axis=1, keepdims=True) * d)
+
+    def stats(v):
+        return {"mean": float(np.mean(v)), "median": float(np.median(v))}
+
+    def slope(p, t):
+        var = float(np.var(t))
+        return float(np.mean((p - p.mean()) * (t - t.mean())) / var) if var > 0 else None
+
+    u = ds["wrist"].astype(np.float64)
+    d = ds["wrist_depth"].astype(np.float64)[te]
+    t = u[te]
+    p = unit(pred[te].astype(np.float64))
+    base = np.repeat(unit(u[tr].mean(axis=0, keepdims=True)), len(te), axis=0)
+    (ext_t, dev_t), (ext_p, dev_p), (ext_b, dev_b) = (wrist.extension_deviation(v) for v in (t, p, base))
+    out.update({
+        "angleDeg": {"model": stats(angle(p, t)), "meanDirection": stats(angle(base, t))},
+        "imagePlaneAngleDeg": {"model": stats(angle(plane(p, d), plane(t, d))), "meanDirection": stats(angle(plane(base, d), plane(t, d)))},
+        "extensionAbsErrDeg": {"model": stats(np.abs(ext_p - ext_t)), "meanDirection": stats(np.abs(ext_b - ext_t))},
+        "deviationAbsErrDeg": {"model": stats(np.abs(dev_p - dev_t)), "meanDirection": stats(np.abs(dev_b - dev_t))},
+        "slope": {"extension": slope(ext_p, ext_t), "deviation": slope(dev_p, dev_t)},
+        "trueSpreadDeg": {"extension": float(np.std(ext_t)), "deviation": float(np.std(dev_t))},
+    })
+    return out
+
+
 def report(m):
     """출력할 요약 줄."""
     b, c, s = m["baselines"], m["collapse"], m["boneShortfallPercent"]
@@ -547,6 +613,20 @@ def report(m):
         f"{text} {k['mpjpeMm']:.1f}({k['meanPoseMm']:.1f}, {k['ratioToMeanPose']:.2f}, {k['frames']})" if k["frames"] else f"{text} 시험에 없음"
         for key, text in dataset.KINDS for k in [m["perKind"][key]]))
     lines.append(f"  나누기별 MPJPE: " + ", ".join(f"{k} {v:.2f} mm" for k, v in m["splitMpjpeMm"].items()))
+    w = m.get("wrist")
+    if w and "angleDeg" in w:
+        a, g, e, v, k = w["angleDeg"], w["imagePlaneAngleDeg"], w["extensionAbsErrDeg"], w["deviationAbsErrDeg"], w["slope"]
+
+        def fmt(x):
+            return "—" if x is None else f"{x:.2f}"
+
+        lines += [f"  손목(무게 {w['weight']:g}, 시험 {w['frames']['test']}프레임): 방향 각 오차 중앙 {a['model']['median']:.1f}°"
+                  f"(평균 방향 {a['meanDirection']['median']:.1f}°), 그림 평면 {g['model']['median']:.1f}°({g['meanDirection']['median']:.1f}°)",
+                  f"    젖힘 오차 {e['model']['median']:.1f}°({e['meanDirection']['median']:.1f}°, 기울기 {fmt(k['extension'])}) ·"
+                  f" 꺾임 오차 {v['model']['median']:.1f}°({v['meanDirection']['median']:.1f}°, 기울기 {fmt(k['deviation'])})"
+                  f" · 정답 흩어짐 젖힘 {w['trueSpreadDeg']['extension']:.1f}° 꺾임 {w['trueSpreadDeg']['deviation']:.1f}°"]
+    elif w:
+        lines.append(f"  손목: 정답이 있는 프레임이 없음(학습 {w['frames']['train']} · 시험 {w['frames']['test']})")
     return lines
 
 
@@ -617,10 +697,15 @@ def main():
     parser.add_argument("--val", action="append", metavar="세션", help="session 모드: 검증 세션(여러 번 줄 수 있음. 없으면 시험이 아닌 가장 늦은 세션)")
     parser.add_argument("--shift", type=int, default=0, metavar="칸", help="학습 증강: 거리 축 ±칸 무작위 이동(논문 5칸 ≈ 1.8 cm, 0이면 끔)")
     parser.add_argument("--mask", action="store_true", help="학습 증강: 시간 5–15줄·거리 5–10칸 구간 가리기(논문)")
+    parser.add_argument("--wrist", type=float, default=0.0, metavar="무게",
+                        help="손목 상태 다중 과제: 워치 기준 손 방향 3값을 함께 학습하고 손실에 이 무게로 더한다(0이면 끔, 예 0.1)")
     parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
     if not 0 <= args.shift <= dataset.BINS.start:
         print(f"--shift는 0…{dataset.BINS.start}칸")
+        return 1
+    if args.wrist < 0:
+        print("--wrist는 0 이상")
         return 1
     wide = slice(dataset.BINS.start - args.shift, dataset.BINS.stop + args.shift)
     ds, lines = dataset.build(args.data, args.sessions, bins=wide, standardized=args.shift == 0)
@@ -646,6 +731,13 @@ def main():
         return 1
     mix = kind_mix(ds, parts)
     print("\n".join(mix_lines(mix)))
+    if args.wrist > 0:
+        has = {name: int(ds["wrist_ok"][idx].sum()) for name, idx in zip(dataset.ROLES, parts)}
+        methods = ", ".join(f"{n} {w or '없음'}" for n, w in zip(ds["sessions"], ds["wrist_method"]))
+        print(f"손목 정답이 있는 프레임: 학습 {has['train']} · 검증 {has['val']} · 시험 {has['test']}(세션별 방위 맞춤: {methods})")
+        if has["train"] == 0:
+            print("학습 프레임에 손목 정답이 없어 --wrist를 쓸 수 없음(워치·폰 센서 기록이 있는 세션이 필요)")
+            return 1
     os.makedirs(folder, exist_ok=True)
     dataset.save(os.path.join(folder, "dataset.npz"), ds, with_x=args.save_x)
     seed_all(args.seed)
@@ -659,16 +751,20 @@ def main():
         x = augment.center()
         hide = f", 그중 {MASK_PROB:.0%}에 시간 {MASK_ROWS[0]}–{MASK_ROWS[1]}줄·거리 {MASK_BINS[0]}–{MASK_BINS[1]}칸 가리기" if args.mask else ""
         print(f"증강: 묶음의 {AUG_FRACTION:.0%}에 거리 ±{args.shift}칸 이동{hide}")
-    y = torch.as_tensor(ds["y"], device=device)
+    target = ds["y"]
+    if args.wrist > 0:  # 손가락 60 · u 3 · 깊이 축 3 · ok 1(loss_fn)
+        target = np.concatenate([ds["y"], ds["wrist"], ds["wrist_depth"], ds["wrist_ok"][:, None].astype(np.float32)], axis=1)
+    y = torch.as_tensor(target, device=device)
     start = time.time()
     try:
         model, history, best_epoch, stopped = fit(x, y, segments(ds["frame_ns"], ds["session"], train), segments(ds["frame_ns"], ds["session"], val),
-                                                  args.epochs, args.seed, max_minutes=args.max_minutes, augment=augment)
+                                                  args.epochs, args.seed, max_minutes=args.max_minutes, augment=augment, wrist_weight=args.wrist)
     except FloatingPointError as e:
         print(f"학습을 멈춤: {e}")
         return 1
     seconds = time.time() - start
-    pred = predict(model, x, np.arange(n))
+    out = predict(model, x, np.arange(n))
+    pred = out[:, :FINGER_OUT]
     m = instruments(ds, pred, train, test)
     yy = ds["y"].reshape(-1, 20, 3)
     mm = ds["length_mm"][ds["session"]]
@@ -681,8 +777,11 @@ def main():
               "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history, "mix": mix, "split": split,
               "augment": {"shift": args.shift, "mask": args.mask, "fraction": AUG_FRACTION, "maskProb": MASK_PROB, "maskRows": list(MASK_ROWS),
                           "maskBins": list(MASK_BINS)} if augment else None})
-    torch.save({"arch": ARCH, "in_chans": 2, "num_classes": 60, "bins": [dataset.BINS.start, dataset.BINS.stop], "window": dataset.WINDOW,
-                "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "state_dict": model.state_dict()},
+    if args.wrist > 0:
+        m["wrist"] = {"weight": args.wrist, "depthWeight": DEPTH_WEIGHT, **wrist_metrics(ds, out[:, FINGER_OUT:FINGER_OUT + WRIST_OUT], train, test)}
+    torch.save({"arch": ARCH, "in_chans": 2, "num_classes": int(model.num_classes), "bins": [dataset.BINS.start, dataset.BINS.stop],
+                "window": dataset.WINDOW, "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "wrist": args.wrist,
+                "state_dict": model.state_dict()},
                os.path.join(folder, "model.pt"))
     hs_io.write_json(os.path.join(folder, "metrics.json"), m)
     names = m["sessions"]

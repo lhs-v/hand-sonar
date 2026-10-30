@@ -64,8 +64,8 @@ def finetune(model_path, lr, rest):
     state = weights(model_path)
     make = train.make_model
 
-    def make_model():
-        model = make()
+    def make_model(outputs=train.FINGER_OUT):
+        model = make(outputs)
         model.load_state_dict(state)
         return model
 

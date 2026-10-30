@@ -121,6 +121,12 @@ class WindowTest(unittest.TestCase):
         np.testing.assert_array_equal(dataset.window_ok(ok, [95, 149, 150, 151, 399, 400]), [False, False, False, True, True, False])
 
 
+class KindTest(unittest.TestCase):
+    def test_calibration_hold_and_pauses_are_not_gesture_kinds(self):
+        kinds = dataset.kind_of(np.array([0, 7, 16, -1, -3, -2, 3]), np.array([True, True, True, True, True, True, False]))
+        np.testing.assert_array_equal([0, 1, 2, 3, 4, 4, 4], kinds)
+
+
 class SessionFolderTest(unittest.TestCase):
     def test_windows_targets_and_labels_stay_paired_through_the_filters(self):
         with tempfile.TemporaryDirectory() as data:
@@ -144,6 +150,9 @@ class SessionFolderTest(unittest.TestCase):
             self.assertGreater(float(np.abs(ds["x"][0, 0] - dataset.standardize(raw[300:360, r - 94: r + 2].T)).max()), 0.5)  # 한 줄 어긋나면 다르다
             np.testing.assert_array_equal([CLASSES[min(n // 60, 3)][0] for n in frame], ds["class_id"])
             np.testing.assert_array_equal(frame % 60 >= 15, ds["labelled"])  # 동작 시작 0.5 s(15프레임)는 경계라 라벨이 아니다
+            self.assertFalse(ds["wrist_ok"].any())  # 워치·폰 센서 기록이 없는 세션: 손목 정답 없음
+            self.assertEqual((len(frame), 3), ds["wrist"].shape)
+            self.assertEqual([""], ds["wrist_method"].tolist())
             self.assertEqual([True], ds["rewear"].tolist())
             self.assertEqual([1], ds["wear"].tolist())  # 다시 찬 세션이라 새 착용(1)이다
             path = os.path.join(data, "dataset.npz")

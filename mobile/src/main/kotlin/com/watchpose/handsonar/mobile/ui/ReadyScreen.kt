@@ -79,6 +79,8 @@ fun ReadyScreen(ui: UiState, c: SessionController, inbox: InboxStatus, onRequest
             )
             val (chirpText, chirpLevel) = chirpStatus(ui.chirp)
             StatusRow("워치 처프", chirpText, chirpLevel)
+            // 기준 자세에서 팔뚝이 섰는지 보는 값(녹음 중인 워치가 보낸다). 없으면 손만 보고 넘어간다.
+            StatusRow("워치 기울기", if (ui.watchTilt) "받는 중" else "없음 — 워치 녹음을 먼저 켜세요", if (ui.watchTilt) Level.OK else Level.WARN)
             val self = ui.selfCheck
             StatusRow(
                 "표지음",

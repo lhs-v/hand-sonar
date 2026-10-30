@@ -17,8 +17,11 @@ import com.watchpose.handsonar.shared.SessionChecks
 
 /**
  * 세션 직후 화면(설계 §6.3): 누르지 않아도 이미 저장됐다. 결과 요약과 "방금 세션 되돌리기"(다음 세션 시작 전까지).
- * 맨 아래 줄은 그 세션의 meta.json에 적은 세션 정보와 "워치 다시 참"이다(계획 6).
+ * 맨 아래 줄은 그 세션의 meta.json에 적은 세션 정보와 "워치 다시 참"이다(계획 6). "기준 자세"는 통과·건너뜀과 유지 구간 각도 중앙값이다
+ * (워치 기울기 없이 손만 보고 넘어갔으면 노랑).
  */
+private fun degrees(v: Double?): String = v?.let { "%.0f°".format(it) } ?: "—"
+
 @Composable
 fun SummaryScreen(ui: UiState, c: SessionController) {
     val s = ui.summary ?: return
@@ -37,6 +40,20 @@ fun SummaryScreen(ui: UiState, c: SessionController) {
             StatusRow("시작 표지음", if (s.startMarker) "찾음" else "못 찾음", if (s.startMarker) Level.OK else Level.BAD)
             StatusRow("끝 표지음", if (s.endMarker) "찾음" else "못 찾음", if (s.endMarker) Level.OK else Level.BAD)
             StatusRow("영상·소리", if (s.videoOk) "저장됨" else "오류", if (s.videoOk) Level.OK else Level.BAD)
+            val cal = s.calibration
+            StatusRow(
+                "기준 자세",
+                when {
+                    cal == null -> "없음"
+                    cal.result == "skip" -> "건너뜀"
+                    else -> "통과 · 손 %s · 팔뚝 %s".format(degrees(cal.handDeg), if (cal.checks == "hand") "워치 기울기 없음" else degrees(cal.forearmDeg))
+                },
+                when {
+                    cal == null || cal.result == "skip" -> Level.WARN
+                    cal.checks == "hand" -> Level.WARN
+                    else -> Level.OK
+                },
+            )
             StatusRow("세션 정보", s.context.line(s.rewear), Level.IDLE) // meta.json에 적은 세션 정보와 "워치 다시 참"(계획 6)
             if (s.undone) WarningText("휴지통으로 보냈습니다. 기록 화면에서 되살릴 수 있습니다")
             ui.error?.let { WarningText(it) }

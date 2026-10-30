@@ -29,8 +29,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.watchpose.handsonar.mobile.camera.TrackedHand
+import com.watchpose.handsonar.mobile.session.CalibrationUi
 import com.watchpose.handsonar.mobile.session.SessionController
 import com.watchpose.handsonar.mobile.session.UiState
+import com.watchpose.handsonar.shared.Labels
 import com.watchpose.handsonar.shared.RunnerPhase
 
 private const val HAND_LOST_WARN_MS = 1_000L
@@ -38,6 +40,7 @@ private const val HAND_LOST_WARN_MS = 1_000L
 /**
  * 수집 화면(설계 §6.1-2): 왼쪽에 거울 미리보기·관절 뼈대·상태 표, 오른쪽에 지금 동작(이름·설명·손 모양), 남은 시간 막대, 다음 동작,
  * 세션 진행 막대, 일시정지·틀림·취소. 손이 1 s 넘게 안 보이거나 워치 처프가 30 s 내리 안 들리면 미리보기 아래에 경고한다(설계 §6.5·§6.6).
+ * 기준 자세 단계(세션 처음)에는 팔뚝·손·손가락 판정 세 줄과 유지 막대를 보이고, "틀림" 자리에 "건너뛰기"를 둔다.
  */
 @Composable
 fun CollectScreen(ui: UiState, c: SessionController) {
@@ -63,7 +66,7 @@ fun CollectScreen(ui: UiState, c: SessionController) {
                 )
             }
             val warning = when {
-                ui.phase == RunnerPhase.PROMPT && ui.handLostMs > HAND_LOST_WARN_MS -> "손이 안 보입니다 — 카메라 앞으로"
+(ui.phase == RunnerPhase.PROMPT || ui.phase == RunnerPhase.CALIB) && ui.handLostMs > HAND_LOST_WARN_MS -> "손이 안 보입니다 — 카메라 앞으로"
                 ui.watchGapWarning -> "워치 처프가 안 들립니다"
                 else -> null
             }
@@ -83,7 +86,11 @@ fun CollectScreen(ui: UiState, c: SessionController) {
                 Text(segmentTitle(ui), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 // 손 그림은 지금 동작 이름 바로 옆에만 둔다(사용자가 "다음" 옆 그림을 다음 동작으로 읽어 헷갈림, 2026-10-27 실기기).
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-                    val shape = if (ui.phase == RunnerPhase.PROMPT || ui.phase == RunnerPhase.PAUSED) ui.prompt?.shape else null
+                    val shape = when {
+                        ui.phase == RunnerPhase.CALIB -> Labels.NEUTRAL.shape
+                        ui.phase == RunnerPhase.PROMPT || ui.phase == RunnerPhase.PAUSED -> ui.prompt?.shape
+                        else -> null
+                    }
                     if (shape != null) {
                         HandShapeView(shape, Modifier.size(width = 150.dp, height = 185.dp), right = ui.trackedHand == TrackedHand.RIGHT)
                     }
@@ -95,7 +102,10 @@ fun CollectScreen(ui: UiState, c: SessionController) {
                         )
                     }
                 }
-                LinearProgressIndicator(progress = { ui.promptProgress }, modifier = Modifier.fillMaxWidth().height(16.dp))
+                val cal = ui.calibration
+                if (ui.phase == RunnerPhase.CALIB) CalibrationLines(cal, ui.watchTilt)
+                val bar = if (ui.phase == RunnerPhase.CALIB && cal != null) (cal.heldMs.toFloat() / cal.holdMs).coerceIn(0f, 1f) else ui.promptProgress
+                LinearProgressIndicator(progress = { bar }, modifier = Modifier.fillMaxWidth().height(16.dp))
                 Text(
                     "다음: ${ui.nextPrompt?.name ?: "—"}",
                     style = MaterialTheme.typography.titleLarge,
@@ -107,7 +117,11 @@ fun CollectScreen(ui: UiState, c: SessionController) {
                 LinearProgressIndicator(progress = { ui.progress }, modifier = Modifier.fillMaxWidth().height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     BigButton(if (ui.phase == RunnerPhase.PAUSED) "계속" else "일시정지", c::togglePause, Modifier.weight(1f), enabled = !ui.busy)
-                    BigButton("틀림", c::markWrong, Modifier.weight(1f), enabled = ui.phase == RunnerPhase.PROMPT && !ui.busy, kind = ButtonKind.TONAL)
+                    if (ui.phase == RunnerPhase.CALIB) {
+                        BigButton("건너뛰기", c::skipCalibration, Modifier.weight(1f), enabled = !ui.busy, kind = ButtonKind.TONAL)
+                    } else {
+                        BigButton("틀림", c::markWrong, Modifier.weight(1f), enabled = ui.phase == RunnerPhase.PROMPT && !ui.busy, kind = ButtonKind.TONAL)
+                    }
                     BigButton("취소", { confirmCancel = true }, Modifier.weight(1f), enabled = !ui.busy, kind = ButtonKind.DANGER)
                 }
             }
@@ -129,6 +143,26 @@ fun CollectScreen(ui: UiState, c: SessionController) {
     }
 }
 
+/** 기준 자세 판정 세 줄: 팔뚝(워치 기울기), 손(그림 평면의 각), 손가락 펴짐. 워치 기울기가 없으면 팔뚝 줄이 그 까닭을 말한다. */
+@Composable
+private fun CalibrationLines(cal: CalibrationUi?, watchTilt: Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        val forearm = cal?.forearmDeg
+        when {
+            !watchTilt || cal?.forearmOk == null -> StatusRow("팔뚝", "워치 기울기 없음 — 손만 봅니다", Level.WARN)
+            cal.forearmOk && forearm != null -> StatusRow("팔뚝", "%.0f° ✓".format(forearm), Level.OK)
+            else -> StatusRow("팔뚝", "%.0f° — 팔뚝을 똑바로 세우세요".format(forearm ?: 0.0), Level.BAD)
+        }
+        val hand = cal?.handDeg
+        when {
+            hand == null -> StatusRow("손", "안 보임", Level.BAD)
+            cal.handOk -> StatusRow("손", "%.0f° ✓".format(hand), Level.OK)
+            else -> StatusRow("손", "%.0f° — 손을 위로 곧게".format(hand), Level.BAD)
+        }
+        if (cal?.fingersOk == true) StatusRow("손가락", "폄 ✓", Level.OK) else StatusRow("손가락", "모두 펴세요", Level.BAD)
+    }
+}
+
 private fun segmentTitle(ui: UiState): String {
     if (ui.phase == RunnerPhase.TAIL || ui.phase == RunnerPhase.CLOSING) return "마무리"
     if (ui.segment == 0) return "세션 준비"
@@ -143,6 +177,7 @@ private fun segmentTitle(ui: UiState): String {
 
 private fun mainText(ui: UiState): String = when (ui.phase) {
     RunnerPhase.IDLE, RunnerPhase.LEAD -> "준비"
+    RunnerPhase.CALIB -> Labels.NEUTRAL.name
     RunnerPhase.PROMPT -> ui.prompt?.name.orEmpty()
     RunnerPhase.REST -> "쉬기"
     RunnerPhase.TAIL, RunnerPhase.CLOSING -> "마무리"
@@ -152,6 +187,7 @@ private fun mainText(ui: UiState): String = when (ui.phase) {
 
 private fun phaseHint(ui: UiState): String = when (ui.phase) {
     RunnerPhase.IDLE, RunnerPhase.LEAD -> "표지음이 울리면 시작합니다"
+    RunnerPhase.CALIB -> Labels.NEUTRAL.hint
     RunnerPhase.REST -> "손을 편하게 두세요"
     RunnerPhase.TAIL, RunnerPhase.CLOSING -> "손을 그대로 두세요"
     RunnerPhase.PAUSED -> "계속을 누르면 이어서 합니다"

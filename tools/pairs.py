@@ -40,6 +40,7 @@ COLUMNS = ["frame", "frameNs", "soundNs", "row", "dtMs", "hand", "direct", "prom
 EDGE_SEC = 0.5  # 동작 줄 시작 뒤, 그리고 끊긴 동작의 멈춘 때 앞 이 안의 프레임은 경계로 본다
 GAP_SEC = 0.1  # frameNs 간격이 이보다 길면 카메라가 끊긴 것으로 센다
 PAUSE_CLASS = -2  # prompts.csv 일시정지 줄(shared Labels.PAUSE_ID)
+NEUTRAL_CLASS = -3  # prompts.csv 기준 자세 줄(shared Labels.NEUTRAL_ID). 동작 라벨이 아니라 dataset이 라벨에서 뺀다
 NO_CLASS = -99  # prompts.csv 줄 밖 프레임의 메모리 안 동작 번호(엄지 0·자유 동작 −1·일시정지 −2와 겹치지 않게. CSV에는 빈 칸)
 
 

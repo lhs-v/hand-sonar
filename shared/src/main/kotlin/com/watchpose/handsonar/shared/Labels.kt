@@ -30,6 +30,9 @@ object Labels {
     /** 일시정지 기록의 번호. */
     const val PAUSE_ID = -2
 
+    /** 기준 자세(세션 처음, 팔뚝과 손을 함께 세운 평행 자세 — PC가 카메라와 워치 방향을 맞추고 손목 각도의 0을 잡는 데 쓴다)의 번호. */
+    const val NEUTRAL_ID = -3
+
     val FINGERS: IntRange = 0..4
     val ASL: IntRange = 5..14
     val WRIST: IntRange = 15..17
@@ -62,11 +65,15 @@ object Labels {
 
     val FREE = Gesture(FREE_ID, "free", "자유 동작", "손가락과 손목을 자유롭게 움직이기", HandShape(listOf(E, E, E, E, E)))
     val PAUSE = Gesture(PAUSE_ID, "pause", "일시정지", "", HandShape(listOf(E, E, E, E, E)))
+    val NEUTRAL = Gesture(
+        NEUTRAL_ID, "neutral", "기준 자세", "팔뚝을 세우고 손을 팔과 일자로 곧게 펴기(손바닥은 카메라 쪽)", HandShape(listOf(E, E, E, E, E)),
+    )
 
-    /** 번호로 동작을 찾는다(0–17, [FREE_ID], [PAUSE_ID]). */
+    /** 번호로 동작을 찾는다(0–17, [FREE_ID], [PAUSE_ID], [NEUTRAL_ID]). */
     fun byId(id: Int): Gesture = when (id) {
         FREE_ID -> FREE
         PAUSE_ID -> PAUSE
+        NEUTRAL_ID -> NEUTRAL
         in 0..17 -> ALL[id]
         else -> throw IllegalArgumentException("없는 동작 번호: $id")
     }

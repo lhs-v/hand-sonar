@@ -11,6 +11,8 @@ import android.os.Looper
 import android.os.SystemClock
 import androidx.annotation.MainThread
 import androidx.lifecycle.LifecycleOwner
+import com.google.android.gms.wearable.MessageClient
+import com.google.android.gms.wearable.Wearable
 import com.watchpose.handsonar.mobile.BuildConfig
 import com.watchpose.handsonar.mobile.audio.AudioOutputs
 import com.watchpose.handsonar.mobile.audio.MarkerFound
@@ -22,6 +24,10 @@ import com.watchpose.handsonar.mobile.camera.CameraPipeline
 import com.watchpose.handsonar.mobile.camera.FrameRecorder
 import com.watchpose.handsonar.mobile.camera.TrackedHand
 import com.watchpose.handsonar.shared.ArmSupport
+import com.watchpose.handsonar.shared.CalibrationGate
+import com.watchpose.handsonar.shared.CalibrationGeometry
+import com.watchpose.handsonar.shared.CalibrationInput
+import com.watchpose.handsonar.shared.CalibrationMeta
 import com.watchpose.handsonar.shared.CameraMeta
 import com.watchpose.handsonar.shared.ChirpCheck
 import com.watchpose.handsonar.shared.ChirpHeard
@@ -41,6 +47,8 @@ import com.watchpose.handsonar.shared.SessionMeta
 import com.watchpose.handsonar.shared.SessionRunner
 import com.watchpose.handsonar.shared.SessionStats
 import com.watchpose.handsonar.shared.Strap
+import com.watchpose.handsonar.shared.Tilt
+import com.watchpose.handsonar.shared.TiltMessage
 import com.watchpose.handsonar.shared.VideoMeta
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +86,22 @@ data class SummaryInfo(
     /** 그 세션의 meta.json에 적은 세션 정보와 "워치 다시 참"(요약 화면 한 줄). */
     val context: SessionContext,
     val rewear: Boolean,
+    /** 기준 자세 결과(meta.json `calibration`). 그 단계 전에 끝났으면 null. */
+    val calibration: CalibrationMeta? = null,
+)
+
+/**
+ * 기준 자세 판정의 지금 모습(수집 화면). 각도는 도이고 모르면 null. [forearmOk]가 null이면 워치 기울기를 못 받아 손만 본다.
+ * [heldMs]는 조건이 이어진 시간, [holdMs]는 넘어가는 데 필요한 시간이다.
+ */
+data class CalibrationUi(
+    val handDeg: Double?,
+    val forearmDeg: Double?,
+    val handOk: Boolean,
+    val fingersOk: Boolean,
+    val forearmOk: Boolean?,
+    val heldMs: Long,
+    val holdMs: Long,
 )
 
 /** 화면이 그리는 상태 전부. 바뀔 때마다 새 값으로 바꾼다. */
@@ -109,6 +133,8 @@ data class UiState(
      * (되돌리기·기록 화면) 다시 켜지며, 그 뒤 되살리면 다시 꺼진다(shared `RewearMark`).
      */
     val rewear: Boolean = false,
+    /** 워치 기울기(녹음 중인 워치가 0.2 s마다 보냄)를 최근 1 s 안에 받았다. 기준 자세에서 팔뚝이 섰는지 보는 데 쓴다. */
+    val watchTilt: Boolean = false,
     // 수집 중
     val phase: RunnerPhase = RunnerPhase.IDLE,
     val segment: Int = 0,
@@ -121,6 +147,8 @@ data class UiState(
     val plannedSec: Int = 0,
     val startMarkerFound: Boolean? = null,
     val watchGapWarning: Boolean = false,
+    /** 기준 자세 단계(또는 그 단계에서 일시정지)면 판정 모습, 아니면 null. */
+    val calibration: CalibrationUi? = null,
     val busy: Boolean = false,
     // 수집 뒤
     val summary: SummaryInfo? = null,
@@ -138,7 +166,11 @@ private class FoundMarker(val found: MarkerFound, val elapsedNs: Long?)
  * 화면이 다시 만들어져도 세션이 이어진다. 화면은 [ui]·[frame]을 그리고 메서드를 부른다. 메서드는 메인 스레드에서 부른다.
  *
  * 세션 흐름: [startSession] → 폴더·meta.json(시작) → 폰 녹음·프레임 기록·폰 센서 기록 시작 → 0.3 s 뒤 시작 표지음 + [SessionRunner] 시작 →
- * 50 ms마다 tick → EndMarkerDue에 끝 표지음 → Finished에 [finishSession](파일 닫기, 끝 표지음 찾기, 통계, meta.json 마무리) → 요약 화면.
+ * 기준 자세(CALIB: 팔뚝과 손을 함께 세운 평행 자세가 2 s 이어지면 넘어감, 건너뛸 수 있음) → 50 ms마다 tick → EndMarkerDue에 끝 표지음 →
+ * Finished에 [finishSession](파일 닫기, 끝 표지음 찾기, 통계, meta.json 마무리) → 요약 화면.
+ * 기준 자세 판정([CalibrationGate]): 새 카메라 프레임마다 손이 그림 평면에서 그림 속 수직선(폰 가속도로 정함)과 이루는 각, 손가락 펴짐, 워치가
+ * 보낸 기울기([TiltMessage], 받은 지 1 s 안)로 본 팔뚝 각을 넣는다. MediaPipe 깊이는 쓰지 않는다(그림 투영에 맞춘 값이라). 결과는 prompts.csv
+ * classId −3 줄(유지 구간)과 meta.json `calibration`에 남는다.
  * 취소하면 같은 길로 닫고 status를 trash로 적는다. 앱이 화면에서 벗어나면 세션을 일시정지한다(설계 §6.6).
  * 폰 센서(전송 설계 §8, 계획 6): 세션 동안 [SensorRecorder]가 가속도·자이로·주변 밝기를 `phone_sensors-NNN.csv`에 적고, 세션을 닫을 때
  * meta.json(끝)보다 먼저 닫아 그 보고를 meta.json `sensors`에 넣는다. 센서를 못 열어도 세션은 이어 간다.
@@ -184,6 +216,8 @@ class SessionController(private val app: Application) {
         // 외부 출력 감시는 앱 수명 동안 이어 가므로(조정자가 앱 하나에 하나) 풀지 않는다. 시작 때 현재 목록을 한 번 채운다.
         audioManager?.registerAudioDeviceCallback(outputCallback, Handler(Looper.getMainLooper()))
         refreshOutputs()
+        // 워치 기울기도 앱 수명 동안 듣는다(준비 화면에 받는지 보이고, 기준 자세에서 팔뚝을 본다). 못 달면 손만 보고 판정한다.
+        runCatching { Wearable.getMessageClient(app).addListener(tiltListener) }
     }
 
     @Volatile private var lastHandNs = 0L
@@ -202,9 +236,27 @@ class SessionController(private val app: Application) {
     private var loopJob: Job? = null
     private var appVisible = true
 
+    /** 화면 회전(Display.getRotation). 그림의 위가 기기의 어느 쪽인지 정한다(기준 자세 판정, meta.json camera.displayRotation). */
+    private var displayRotation = 0
+
+    // 기준 자세(주 스레드만). 워치 기울기는 메시지 콜백이 바꾼다.
+    private val gate = CalibrationGate()
+    private var gateFrameNs = 0L
+    private var gatePhaseNs = -1L // 판정기가 따르는 CALIB 단계의 시작 시각(바뀌면 — 처음이거나 일시정지 뒤 다시 — 판정기를 비운다)
+    private var calibration: CalibrationMeta? = null
+    @Volatile private var tilt: Tilt? = null
+    @Volatile private var tiltAtNs = 0L
+    private val tiltListener = MessageClient.OnMessageReceivedListener { event ->
+        if (event.path == TiltMessage.PATH) TiltMessage.decode(event.data)?.let {
+            tilt = it
+            tiltAtNs = SystemClock.elapsedRealtimeNanos()
+        }
+    }
+
     /** 권한을 받은 뒤(화면이 다시 만들어질 때마다) 부른다: 카메라를 이 화면에 잇고, 마이크·표지음을 연다. */
     @MainThread
     fun openDevices(owner: LifecycleOwner, smallestWidthDp: Int, displayRotation: Int) {
+        this.displayRotation = displayRotation
         state.update { it.copy(permissionsGranted = true, error = null) }
         camera.start(owner, smallestWidthDp, displayRotation)
         val micError = mic.start()
@@ -370,8 +422,12 @@ class SessionController(private val app: Application) {
         recorder = FrameRecorder(dir)
         // 폰 센서(전송 설계 §8): 폰이 그대로였는지(가속도·자이로)와 카메라 조건(주변 밝기). 못 열어도 세션은 이어 가고 meta.json에 남긴다.
         sensors = SensorRecorder(app, dir, SensorPlan.PHONE_BASE, SensorPlan.PHONE).also { it.start() }
-        val r = SessionRunner(plan)
+        val r = SessionRunner(plan, calibrate = true)
         runner = r
+        gate.reset()
+        gateFrameNs = 0L
+        gatePhaseNs = -1L
+        calibration = null
         state.update {
             it.copy(
                 screen = Screen.COLLECT,
@@ -409,6 +465,16 @@ class SessionController(private val app: Application) {
     @MainThread
     fun markWrong() {
         runner?.markWrong()
+    }
+
+    /** 기준 자세를 건너뛴다(그 단계일 때만). prompts.csv에 "skip"으로 남고 meta.json `calibration.result`가 "skip"이다. */
+    @MainThread
+    fun skipCalibration() {
+        val r = runner ?: return
+        if (r.phase != RunnerPhase.CALIB) return
+        calibration = CalibrationMeta(SKIP, checksNow(SystemClock.elapsedRealtimeNanos()), null, null, 0)
+        r.skipCalibration(SystemClock.elapsedRealtimeNanos())
+        state.update { it.copy(calibration = null) }
     }
 
     @MainThread
@@ -515,7 +581,12 @@ class SessionController(private val app: Application) {
                 val seen = lastHandNs
                 val lostMs = if (seen == 0L) Long.MAX_VALUE else (now - seen) / 1_000_000
                 state.update {
-                    it.copy(handVisible = lostMs < HAND_VISIBLE_MS, handLostMs = if (seen == 0L) 0 else lostMs, cameraLabel = cameraLabel())
+                    it.copy(
+                        handVisible = lostMs < HAND_VISIBLE_MS,
+                        handLostMs = if (seen == 0L) 0 else lostMs,
+                        cameraLabel = cameraLabel(),
+                        watchTilt = freshTilt(now) != null,
+                    )
                 }
                 delay(if (runner != null) TICK_MS else IDLE_TICK_MS)
             }
@@ -533,16 +604,18 @@ class SessionController(private val app: Application) {
                 else -> Unit
             }
         }
+        if (r.phase == RunnerPhase.CALIB) calibrate(r, now)
         // 보일 동작: 동작 중이면 지금 동작, 일시정지면 다시 시작할 동작(끝부터 다시면 없음)
         val shownIndex = when (r.phase) {
             RunnerPhase.PROMPT -> r.currentPrompt
             RunnerPhase.PAUSED -> r.resumePrompt
             else -> -1
         }
-        val nextIndex = when (r.phase) {
-            RunnerPhase.IDLE, RunnerPhase.LEAD -> 0
-            RunnerPhase.PROMPT, RunnerPhase.REST -> r.currentPrompt + 1
-            RunnerPhase.PAUSED -> if (r.resumePrompt >= 0) r.resumePrompt + 1 else -1
+        val nextIndex = when {
+            r.calibrating -> 0
+            r.phase == RunnerPhase.IDLE || r.phase == RunnerPhase.LEAD -> 0
+            r.phase == RunnerPhase.PROMPT || r.phase == RunnerPhase.REST -> r.currentPrompt + 1
+            r.phase == RunnerPhase.PAUSED -> if (r.resumePrompt >= 0) r.resumePrompt + 1 else -1
             else -> -1
         }
         val shown = r.plan.prompts.getOrNull(shownIndex)
@@ -557,9 +630,48 @@ class SessionController(private val app: Application) {
                 progress = r.progress(now),
                 elapsedSec = (r.activeNs(now) / 1_000_000_000L).toInt(),
                 watchGapWarning = watchGapNow(),
+                calibration = if (r.calibrating) it.calibration else null,
             )
         }
     }
+
+    /**
+     * 기준 자세 단계에서 새 카메라 프레임이 왔으면 판정에 넣는다. 손: 그림 평면의 각(손목 → 중지 MCP, 그림 속 수직선은 폰 가속도로)과 손가락
+     * 펴짐. 팔뚝: 워치 기울기(받은 지 1 s 안일 때만). 2 s 이어지면 그 유지 구간을 넘기고 첫 동작으로 간다.
+     * CALIB 단계가 새로 시작됐으면(처음이거나 일시정지 뒤) 판정기를 비우고, 그 단계 시작 전에 찍힌 프레임은 넣지 않는다(멈춘 시간이 유지로 세지 않게).
+     */
+    private fun calibrate(r: SessionRunner, now: Long) {
+        if (r.phaseStartNs != gatePhaseNs) {
+            gate.reset()
+            gatePhaseNs = r.phaseStartNs
+        }
+        val f = frames.value ?: return
+        if (f.hand.frameNs <= gateFrameNs || f.hand.frameNs < r.phaseStartNs) return
+        gateFrameNs = f.hand.frameNs
+        val image = f.hand.image
+        val w = f.bitmap.width
+        val h = f.bitmap.height
+        val up = sensors?.latestAccel?.let { CalibrationGeometry.projectedUp(it, displayRotation) }
+        val handDeg = if (image != null && up != null) CalibrationGeometry.handInPlaneDeg(image, w, h, up) else null
+        val fingers = image != null && CalibrationGeometry.fingersStraight(image, w, h)
+        val forearmDeg = freshTilt(now)?.let { CalibrationGeometry.forearmDeg(it.values()) }
+        val st = gate.update(CalibrationInput(f.hand.frameNs, handDeg, fingers, forearmDeg))
+        state.update {
+            it.copy(calibration = CalibrationUi(handDeg, forearmDeg, st.handOk, st.fingersOk, st.forearmOk, st.heldMs, gate.holdMs))
+        }
+        val start = st.holdStartNs
+        if (st.done && start != null) {
+            calibration = CalibrationMeta(OK, checksNow(now), st.handMedianDeg, st.forearmMedianDeg, st.heldMs)
+            r.calibrated(start, now)
+            state.update { it.copy(calibration = null) }
+        }
+    }
+
+    /** 받은 지 [TiltMessage.FRESH_MS] 안의 워치 기울기, 아니면 null. */
+    private fun freshTilt(now: Long): Tilt? = tilt?.takeIf { now - tiltAtNs <= TiltMessage.FRESH_MS * 1_000_000 }
+
+    /** meta.json `calibration.checks`: 워치 기울기를 받고 있으면 "hand+forearm", 아니면 "hand". */
+    private fun checksNow(now: Long): String = if (freshTilt(now) != null) CHECKS_BOTH else CHECKS_HAND
 
     /** 세션을 닫는다: 프레임·소리 기록을 멈추고, 끝 표지음을 찾고, 통계·prompts.csv·phone_audio.json·meta.json을 쓴다. */
     @MainThread
@@ -580,7 +692,8 @@ class SessionController(private val app: Application) {
         val startPlayNs = startMarkerPlayNs
         val endPlayNs = endMarkerPlayNs
         val chirps = synchronized(chirpLock) { chirpLog.toList() }
-        state.update { it.copy(busy = true, phase = r.phase) }
+        val calib = calibration // 다음 세션이 지우기 전에 잡아 둔다
+        state.update { it.copy(busy = true, phase = r.phase, calibration = null) }
         scope.launch {
             // 끝 표지음은 낸 지 0.8 s가 지난 뒤 고리 버퍼에서 찾는다. 보통 Finished가 그 시각이지만, tick이 늦어 EndMarkerDue와
             // Finished가 한꺼번에 오면 표지음을 막 낸 참이므로 남은 시간을 기다린다. 취소면 끝 표지음이 없다.
@@ -640,6 +753,7 @@ class SessionController(private val app: Application) {
                         video = rec?.takeIf { it.frames > 0 }?.let { VideoMeta(FrameRecorder.VIDEO_FILE, it.videoWidth, it.videoHeight, it.videoFrames, videoOk) },
                         cancelled = cancelled,
                         sensors = sensorReport,
+                        calibration = calib,
                     )
                     store.writeMeta(dir, meta.toJson())
                     SummaryInfo(
@@ -657,6 +771,7 @@ class SessionController(private val app: Application) {
                         undone = false,
                         context = meta0.context,
                         rewear = meta0.rewear,
+                        calibration = calib,
                     )
                 }
             }
@@ -731,6 +846,7 @@ class SessionController(private val app: Application) {
         return CameraMeta(
             c.id, c.display, camera.frameWidth, camera.frameHeight, CameraPipeline.FPS, camera.timeBase,
             mirrored = true, rotation = camera.rotation, delegate = camera.delegate.ifEmpty { null }, measuredFps = measuredFps,
+            displayRotation = displayRotation,
         )
     }
 
@@ -776,5 +892,9 @@ class SessionController(private val app: Application) {
         const val GAP_BLOCKS = 2
         const val WARN_BLOCKS = 60
         const val BLOCK_NS = 500_000_000L
+        const val OK = "ok"
+        const val SKIP = "skip"
+        const val CHECKS_BOTH = "hand+forearm"
+        const val CHECKS_HAND = "hand"
     }
 }

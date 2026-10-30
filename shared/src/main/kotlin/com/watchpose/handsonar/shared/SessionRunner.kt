@@ -18,6 +18,9 @@ sealed interface RunnerEvent {
 
     data object RestStarted : RunnerEvent
 
+    /** 기준 자세 단계(CALIB)가 시작됐다(시작 뒤 LEAD가 끝났거나, 그 단계에서 일시정지했다가 다시 시작함). */
+    data object CalibrationStarted : RunnerEvent
+
     /** 마지막 동작 뒤 1 s가 지났다: 지금 끝 표지음을 낸다. */
     data object EndMarkerDue : RunnerEvent
 
@@ -25,14 +28,18 @@ sealed interface RunnerEvent {
     data object Finished : RunnerEvent
 }
 
-enum class RunnerPhase { IDLE, LEAD, PROMPT, REST, TAIL, CLOSING, PAUSED, FINISHED, CANCELLED }
+enum class RunnerPhase { IDLE, LEAD, CALIB, PROMPT, REST, TAIL, CLOSING, PAUSED, FINISHED, CANCELLED }
 
 /**
  * 세션 진행 상태 기계(설계 §6.2·§6.3). 시각은 모두 elapsedNs로 받고 스스로 시계를 읽지 않는다(시험할 수 있게).
  * 화면 쪽이 50 ms쯤마다 [tick]을 부른다. 단계 경계는 예정 시각으로 넘기므로 tick이 늦어도 동작 길이가 2 s로 유지된다.
  *
- * 흐름: [start] → LEAD 1 s(시작 표지음은 부르는 쪽이 start와 함께 낸다) → 동작(2 s씩, 자유 동작은 정한 길이) →
+ * 흐름: [start] → LEAD 1 s(시작 표지음은 부르는 쪽이 start와 함께 낸다) → ([calibrate]면 CALIB) → 동작(2 s씩, 자유 동작은 정한 길이) →
  * 구간이 바뀌면 REST 2 s → … → 마지막 동작 뒤 TAIL 1 s → EndMarkerDue → CLOSING 0.8 s → Finished.
+ *
+ * - 기준 자세(CALIB, [calibrate]가 참일 때만): 시간으로 끝나지 않는다. 부르는 쪽이 판정([CalibrationGate])을 보고 [calibrated]로
+ *   유지 구간을 넘기면 그 구간을 classId [Labels.NEUTRAL_ID]로 적고, [skipCalibration]이면 단계 전체를 "skip"으로 적은 뒤 첫 동작으로 간다.
+ *   CALIB 도중 일시정지하면 다시 시작할 때 CALIB를 처음부터 다시 한다. 진행률([progress])에는 CALIB 시간을 넣지 않는다.
  *
  * - 일시정지([pause]): 안내만 멈춘다(녹음은 부르는 쪽이 계속한다). 동작 도중이면 그 동작을 지금까지로 끊어 "pause"로 적고,
  *   다시 시작([resume])하면 일시정지 구간을 "pause"로 적은 뒤 끊긴 동작을 처음부터 다시 보인다.
@@ -42,7 +49,7 @@ enum class RunnerPhase { IDLE, LEAD, PROMPT, REST, TAIL, CLOSING, PAUSED, FINISH
  * [pause]·[cancel]·[markWrong]는 부르기 직전에 [tick]으로 시간을 반영해 둔 상태라고 가정한다(조정자가 50 ms마다 tick을 부르므로
  * 경계와의 어긋남은 50 ms 안이다).
  */
-class SessionRunner(val plan: SessionPlan) {
+class SessionRunner(val plan: SessionPlan, val calibrate: Boolean = false) {
     var phase: RunnerPhase = RunnerPhase.IDLE
         private set
 
@@ -50,13 +57,17 @@ class SessionRunner(val plan: SessionPlan) {
     var currentPrompt: Int = -1
         private set
 
-    /** PAUSED일 때 [resume]하면 다시 보일 동작의 plan.prompts 번호. 끝(TAIL)부터 다시 하면 -1. PAUSED가 아니면 의미 없다. */
+    /** PAUSED일 때 [resume]하면 다시 보일 동작의 plan.prompts 번호. 끝(TAIL)이나 기준 자세(CALIB)부터 다시 하면 -1. PAUSED가 아니면 의미 없다. */
     val resumePrompt: Int
         get() = when (pausedFrom) {
             RunnerPhase.PROMPT -> currentPrompt
-            RunnerPhase.TAIL -> -1
+            RunnerPhase.TAIL, RunnerPhase.CALIB -> -1
             else -> nextPrompt
         }
+
+    /** 기준 자세 단계이거나, 그 단계에서 일시정지함(다시 시작하면 기준 자세부터). */
+    val calibrating: Boolean
+        get() = phase == RunnerPhase.CALIB || (phase == RunnerPhase.PAUSED && pausedFrom == RunnerPhase.CALIB)
 
     /** 시작부터 [nowNs]까지 일시정지를 뺀 시간(ns). 시작하지 않았으면 0. 끝난 뒤에는 끝난 시각까지. */
     fun activeNs(nowNs: Long): Long {
@@ -88,6 +99,7 @@ class SessionRunner(val plan: SessionPlan) {
     private var pausedFrom = RunnerPhase.IDLE
     private var pauseStartNs = 0L
     private var pausedTotalNs = 0L
+    private var calibTotalNs = 0L // 끝난 CALIB 단계들의 시간 합(진행률에서 뺀다)
 
     fun start(nowNs: Long) {
         check(phase == RunnerPhase.IDLE) { "이미 시작함" }
@@ -107,6 +119,7 @@ class SessionRunner(val plan: SessionPlan) {
     fun pause(nowNs: Long) {
         if (phase !in PAUSABLE) return
         if (phase == RunnerPhase.PROMPT) recordPrompt(currentPrompt, phaseStartNs, nowNs, FLAG_PAUSE)
+        if (phase == RunnerPhase.CALIB) calibTotalNs += nowNs - phaseStartNs
         pausedFrom = phase
         pauseStartNs = nowNs
         phase = RunnerPhase.PAUSED
@@ -120,8 +133,34 @@ class SessionRunner(val plan: SessionPlan) {
         when (pausedFrom) {
             RunnerPhase.PROMPT -> beginPrompt(currentPrompt, nowNs, events)
             RunnerPhase.TAIL -> enter(RunnerPhase.TAIL, nowNs, PromptPlanner.TAIL_MS)
-            else -> beginPrompt(nextPrompt, nowNs, events) // LEAD·REST
+            RunnerPhase.CALIB -> beginCalibration(nowNs, events)
+            RunnerPhase.LEAD -> if (calibrate) beginCalibration(nowNs, events) else beginPrompt(0, nowNs, events)
+            else -> beginPrompt(nextPrompt, nowNs, events) // REST
         }
+        return events
+    }
+
+    /**
+     * 기준 자세 판정이 [holdStartNs]부터 [nowNs]까지 유지됐다: 그 구간을 classId [Labels.NEUTRAL_ID]로 적고 첫 동작을 시작한다.
+     * 유지 시작은 이 CALIB 단계가 시작된 때보다 앞일 수 없다(앞이면 단계 시작으로 자른다). CALIB가 아니면 아무것도 하지 않는다.
+     */
+    fun calibrated(holdStartNs: Long, nowNs: Long): List<RunnerEvent> {
+        if (phase != RunnerPhase.CALIB) return emptyList()
+        out += PromptRecord(out.size, 0, Labels.NEUTRAL_ID, Labels.NEUTRAL.name, maxOf(phaseStartNs, minOf(holdStartNs, nowNs)), nowNs, "")
+        return leaveCalibration(nowNs)
+    }
+
+    /** 기준 자세를 건너뛴다: 이 CALIB 단계 전체를 "skip"으로 적고 첫 동작을 시작한다. CALIB가 아니면 아무것도 하지 않는다. */
+    fun skipCalibration(nowNs: Long): List<RunnerEvent> {
+        if (phase != RunnerPhase.CALIB) return emptyList()
+        out += PromptRecord(out.size, 0, Labels.NEUTRAL_ID, Labels.NEUTRAL.name, phaseStartNs, nowNs, FLAG_SKIP)
+        return leaveCalibration(nowNs)
+    }
+
+    private fun leaveCalibration(nowNs: Long): List<RunnerEvent> {
+        calibTotalNs += nowNs - phaseStartNs
+        val events = mutableListOf<RunnerEvent>()
+        beginPrompt(0, nowNs, events)
         return events
     }
 
@@ -146,7 +185,8 @@ class SessionRunner(val plan: SessionPlan) {
     /** 일시정지 시간을 뺀 진행률 0..1(세션 진행 막대). */
     fun progress(nowNs: Long): Float {
         if (phase == RunnerPhase.FINISHED) return 1f
-        return (activeNs(nowNs).toDouble() / (plan.plannedMs * 1_000_000.0)).coerceIn(0.0, 1.0).toFloat()
+        val calib = calibTotalNs + if (phase == RunnerPhase.CALIB) nowNs - phaseStartNs else 0L
+        return ((activeNs(nowNs) - calib).toDouble() / (plan.plannedMs * 1_000_000.0)).coerceIn(0.0, 1.0).toFloat()
     }
 
     /** 지금 동작의 진행률 0..1(남은 시간 막대). 동작 중이 아니면 0. */
@@ -158,7 +198,7 @@ class SessionRunner(val plan: SessionPlan) {
 
     private fun advance(t: Long, events: MutableList<RunnerEvent>) {
         when (phase) {
-            RunnerPhase.LEAD -> beginPrompt(0, t, events)
+            RunnerPhase.LEAD -> if (calibrate) beginCalibration(t, events) else beginPrompt(0, t, events)
             RunnerPhase.PROMPT -> {
                 recordPrompt(currentPrompt, phaseStartNs, t, if (wrong) FLAG_WRONG else "")
                 val next = currentPrompt + 1
@@ -184,6 +224,13 @@ class SessionRunner(val plan: SessionPlan) {
             }
             else -> error("시간으로 넘어가는 단계가 아님: $phase")
         }
+    }
+
+    private fun beginCalibration(t: Long, events: MutableList<RunnerEvent>) {
+        phase = RunnerPhase.CALIB
+        phaseStartNs = t
+        phaseEndsNs = Long.MAX_VALUE // 시간으로 끝나지 않는다(TIMED에 없음)
+        events += RunnerEvent.CalibrationStarted
     }
 
     private fun beginPrompt(i: Int, t: Long, events: MutableList<RunnerEvent>) {
@@ -213,7 +260,10 @@ class SessionRunner(val plan: SessionPlan) {
         const val CLOSING_MS = 800L
         const val FLAG_WRONG = "wrong"
         const val FLAG_PAUSE = "pause"
+
+        /** 기준 자세를 건너뜀(prompts.csv classId [Labels.NEUTRAL_ID] 줄). */
+        const val FLAG_SKIP = "skip"
         private val TIMED = setOf(RunnerPhase.LEAD, RunnerPhase.PROMPT, RunnerPhase.REST, RunnerPhase.TAIL, RunnerPhase.CLOSING)
-        private val PAUSABLE = setOf(RunnerPhase.LEAD, RunnerPhase.PROMPT, RunnerPhase.REST, RunnerPhase.TAIL)
+        private val PAUSABLE = setOf(RunnerPhase.LEAD, RunnerPhase.CALIB, RunnerPhase.PROMPT, RunnerPhase.REST, RunnerPhase.TAIL)
     }
 }

@@ -17,7 +17,16 @@ data class CameraMeta(
     val rotation: Int,
     val delegate: String? = null,
     val measuredFps: Double? = null,
+    /** 화면 회전(Display.getRotation, 0–3). 그림의 위가 기기의 어느 쪽인지 정한다(PC가 폰 중력을 그림 축으로 옮길 때). 이 칸 전 세션은 null(0으로 본다). */
+    val displayRotation: Int? = null,
 )
+
+/**
+ * meta.json `calibration`: 기준 자세 단계의 결과(설계: 손목 상태 학습). [result]는 "ok"(판정 통과) | "skip"(건너뜀)이다.
+ * [checks]는 "hand+forearm"(워치 기울기도 봄) | "hand"(워치 기울기를 못 받아 손만 봄). 각도는 유지 구간 프레임들의 중앙값(도)이고 모르면 null.
+ * 유지 구간 시각은 prompts.csv의 classId −3 줄에 있다.
+ */
+data class CalibrationMeta(val result: String, val checks: String, val handDeg: Double?, val forearmDeg: Double?, val holdMs: Long)
 
 /** 표지음 하나의 기록. [micFrame]은 phone_audio.wav 안에서 찾은 시작 샘플, [elapsedNs]는 그 샘플의 폰 시각. 못 찾으면 found=false. */
 data class MarkerMeta(val found: Boolean, val playNs: Long, val micFrame: Double?, val elapsedNs: Long?, val ratio: Double?)
@@ -40,7 +49,7 @@ data class SessionStats(
  * [hand]는 추적한 손(워치를 찬 손)으로 "left" | "right"다.
  * [rewear]는 이 세션 전에 워치를 벗었다 다시 찼다는 표시다(준비 화면 "워치 다시 참", 계획 6 — 다시 찬 뒤 처음 보관된 세션에 참).
  * [context]는 준비 화면에서 고른 세션 정보, [sensors]는 폰 센서 기록(`phone_sensors-NNN.csv`)의 보고로 끝에서 다시 쓴 meta에만 있다.
- * 두 칸은 `rewear` 바로 뒤에 적는다.
+ * 두 칸은 `rewear` 바로 뒤에 적는다. [calibration]은 기준 자세 단계의 결과로 `sensors` 뒤에 적는다(그 단계 전에 끝났거나 이 기능 전 세션은 null).
  */
 data class SessionMeta(
     val app: String,
@@ -64,6 +73,7 @@ data class SessionMeta(
     val cancelled: Boolean,
     val context: SessionContext = SessionContext(),
     val sensors: SensorReport? = null,
+    val calibration: CalibrationMeta? = null,
 ) {
     fun toJson(): String = JsonOut.write(
         linkedMapOf<String, Any?>(
@@ -75,7 +85,7 @@ data class SessionMeta(
                 linkedMapOf<String, Any?>(
                     "id" to it.id, "display" to it.display, "width" to it.width, "height" to it.height,
                     "fps" to it.fps, "timeBase" to it.timeBase, "mirrored" to it.mirrored, "rotation" to it.rotation,
-                    "delegate" to it.delegate, "measuredFps" to it.measuredFps,
+                    "delegate" to it.delegate, "measuredFps" to it.measuredFps, "displayRotation" to it.displayRotation,
                 )
             },
             "hand" to hand,
@@ -110,6 +120,9 @@ data class SessionMeta(
             "rewear" to rewear,
             "context" to context.toMap(),
             "sensors" to sensors?.toMap(),
+            "calibration" to calibration?.let {
+                linkedMapOf<String, Any?>("result" to it.result, "checks" to it.checks, "handDeg" to it.handDeg, "forearmDeg" to it.forearmDeg, "holdMs" to it.holdMs)
+            },
             "video" to video?.let {
                 linkedMapOf<String, Any?>("file" to it.file, "width" to it.width, "height" to it.height, "frames" to it.frames, "ok" to it.ok)
             },
