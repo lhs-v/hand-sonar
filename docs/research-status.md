@@ -117,6 +117,18 @@
 - **붕괴 계기:** 움직이는 점 16 × 3축마다 예측을 정답에 회귀한 기울기(1 = 정답만큼 움직임, 0 = 무관)와 상관
 - 평활한 예측의 σ비, 마디별 뼈 길이 부족, 편 손(ASL-5) 쪽 투영 치우침, 정답 잡음 바닥(2 s 유지 구간의 흔들림, 약 4.5 mm)도 낸다.
 
+**결과 영상(`tools/render_video.py`)**
+- 숫자만으로는 어느 순간에 틀리는지 보기 어려워 시험 프레임을 영상으로 그린다.
+  - 왼쪽: 손 영상 위 정답(흰 선)과 예측(파란 띠).
+  - 가운데·오른쪽: 손바닥 틀 3D 두 시점(정답·예측·학습 평균 자세).
+  - 아래: 동작·MPJPE·역할 꼬리표와 오차 시간 띠(모델과 평균 자세 상수).
+- 예측 뼈대는 근사다. 모델은 손바닥 틀 안의 모양만 내므로, 손 방향·크기·위치는 그 프레임 정답을 쓰고 손가락 모양만 예측으로 바꿔 그린다.
+- 나누기는 그 실행의 `metrics.json`대로 다시 만들고, 예측은 그 세션의 창을 다시 만들어 낸다.
+- 영상(얼굴)은 저장소에 없다. 데이터 묶음만 있는 PC에서는 화면 좌표 뼈대로 그린다(`--no-video`). `--seg`는 손만 남긴다.
+- 2026-10-30 블록 판 시험 블록:
+  - 우리 세션 20261028-201138: MPJPE 15.2 mm, 평균 자세 상수 14.8 mm. 시간 띠에서 모델 선이 평균 자세 선과 거의 겹친다.
+  - 공개 세션 20250320-205102: 6.0 mm, 8.6 mm. 손이 평균 자세에서 벗어나는 구간에서 모델 선이 평균 자세 선 아래에 머문다.
+
 ## 5. 결과(시간 순)
 
 ### 5.1 세션 하나(10-27)
@@ -236,10 +248,17 @@ python -I tools/experiments/public_to_ours.py <받은 파일 폴더> ../public-a
 python -I tools/train.py --data ../public-as-ours --mode blocks --run pub10-blocks
 python -I tools/experiments/transfer.py zeroshot ../public-as-ours/processed/training/pub10-blocks/model.pt ../hand-sonar-unpacked ../public-as-ours/processed/training/pub10-blocks/dataset.npz zeroshot.json
 python -I tools/experiments/transfer.py finetune ../public-as-ours/processed/training/pub10-blocks/model.pt 1e-3 --data ../hand-sonar-unpacked --mode blocks --run ft-pub-blocks
+
+# 학습 결과를 영상으로(그 실행의 시험 프레임). 데이터 묶음에는 영상이 없어 화면 좌표 뼈대로 그린다
+python -I tools/render_video.py ../hand-sonar-unpacked/processed/training/blocks-9 --data ../hand-sonar-unpacked --out ../hand-sonar-videos
+# 영상이 있는 PC는 손만 보이게, 공개 데이터는 원본 mp4를 준다
+python -I tools/render_video.py ../hand-sonar-data/processed/training/blocks-9 --out ../hand-sonar-videos --seg
+python -I tools/render_video.py ../public-as-ours/processed/training/pub10-blocks --data ../public-as-ours --session 20250320-205102 --video "<받은 파일 폴더>/<접두>record_20250320_205102_215016.mp4" --out ../hand-sonar-videos
 ```
 
 - 공개 데이터는 zip 전체(11.8 GB)가 아니라 필요한 파일만 범위 요청으로 꺼냈다. 방법과 함정은 [public-watchhand-data.md](public-watchhand-data.md)에 있다.
 - 파이썬 3.13, numpy·scipy·matplotlib, 학습은 torch(CUDA)와 timm 1.0.30을 쓴다. 공개 데이터 변환에는 mediapipe(1.2.0)와 opencv가 필요하다.
+  결과 영상에는 opencv·Pillow·imageio-ffmpeg와 한글 글꼴(윈도 맑은 고딕, 리눅스 나눔고딕·Noto Sans CJK, 없으면 `--font`)이 필요하다.
 - 실행마다 결과가 결정적이다(씨앗 고정, cuDNN 결정적). 위 숫자는 RTX 5070에서 낸 것이다.
 
 ## 9. 함정(겪은 것)
