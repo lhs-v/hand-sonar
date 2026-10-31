@@ -105,11 +105,17 @@ class SessionMetaTest {
 
     @Test
     fun calibrationComesAfterSensors() {
-        val json = meta(stats = null, endWallMs = null).copy(calibration = CalibrationMeta("ok", "hand+forearm", 3.5, null, 2_100)).toJson()
+        val calib = CalibrationMeta("ok", "hand+forearm", side = CalibrationStep(2.0, 4.0, 2_050), front = CalibrationStep(3.5, null, 2_100))
+        val json = meta(stats = null, endWallMs = null).copy(calibration = calib).toJson()
         assertTrue(
-            json.contains("\"sensors\":null,\"calibration\":{\"result\":\"ok\",\"checks\":\"hand+forearm\",\"handDeg\":3.5,\"forearmDeg\":null,\"holdMs\":2100},\"video\":"),
+            json.contains(
+                "\"sensors\":null,\"calibration\":{\"result\":\"ok\",\"checks\":\"hand+forearm\"," +
+                    "\"side\":{\"handDeg\":2.0,\"forearmDeg\":4.0,\"holdMs\":2050},\"front\":{\"handDeg\":3.5,\"forearmDeg\":null,\"holdMs\":2100}},\"video\":",
+            ),
             json,
         )
+        val skipped = meta(stats = null, endWallMs = null).copy(calibration = CalibrationMeta("skip", "hand", side = null, front = null)).toJson()
+        assertTrue(skipped.contains("\"calibration\":{\"result\":\"skip\",\"checks\":\"hand\",\"side\":null,\"front\":null}"), skipped)
     }
 
     @Test

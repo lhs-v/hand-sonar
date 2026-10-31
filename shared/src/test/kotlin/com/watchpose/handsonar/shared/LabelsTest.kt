@@ -18,8 +18,12 @@ class LabelsTest {
 
     @Test
     fun specialIdsDoNotCollide() {
-        assertEquals(listOf("free", "pause", "neutral"), listOf(Labels.FREE_ID, Labels.PAUSE_ID, Labels.NEUTRAL_ID).map { Labels.byId(it).key })
-        assertEquals(3, setOf(Labels.FREE_ID, Labels.PAUSE_ID, Labels.NEUTRAL_ID).size)
+        assertEquals(
+            listOf("free", "pause", "neutral", "neutral_side"),
+            listOf(Labels.FREE_ID, Labels.PAUSE_ID, Labels.NEUTRAL_ID, Labels.NEUTRAL_SIDE_ID).map { Labels.byId(it).key },
+        )
+        assertEquals(4, setOf(Labels.FREE_ID, Labels.PAUSE_ID, Labels.NEUTRAL_ID, Labels.NEUTRAL_SIDE_ID).size)
+        assertEquals(listOf(Labels.NEUTRAL_SIDE_ID, Labels.NEUTRAL_ID), Labels.CALIBRATION_IDS) // 옆면 다음 정면(본편과 같은 방향으로 끝남)
         assertEquals(WristPose.NEUTRAL, Labels.NEUTRAL.shape.wrist)
     }
 

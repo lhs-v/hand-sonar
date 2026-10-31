@@ -16,8 +16,8 @@
   종류별로 뺀 비율을 보고 줄에 적고, 한 종류가 치우쳐 빠지면(전체 비율의 2배 넘게) 그 사실도 적는다. 거울을 되돌린 손에서 엄지가
   손바닥 쪽인 프레임(joints.thumb_palmar)이 90% 아래인 세션은 손 방향 처리가 틀렸거나 반쯤 거울인 것이라 쓰지 않는다.
 - 동작 라벨(평가용, 학습 목표 아님): pairs.csv prompt·classId·flag·edge. 라벨로 쓸 줄 = prompt ≥ 0, edge 0, 일시정지 아님,
-  flag ≠ wrong(pairs.py와 같은 규칙). 자유 동작(−1)은 라벨이 있는 줄로 친다. 기준 자세(−3, 세션 처음 평행 자세)는 동작이 아니라 라벨에서 뺀다
-  (프레임은 학습에 그대로 쓴다).
+  flag ≠ wrong(pairs.py와 같은 규칙). 자유 동작(−1)은 라벨이 있는 줄로 친다. 기준 자세(옆면 −4·정면 −3, 세션 처음 평행 자세)는 동작이
+  아니라 라벨에서 뺀다(프레임은 학습에 그대로 쓴다).
 - 손목 정답(wrist.session_wrist, 2026-10-30): 프레임마다 워치 축으로 적은 손 방향 u와 카메라 깊이 축 d. 워치·폰 센서 기록이 없는 세션
   (이 기능 전·공개 데이터)은 wrist_ok가 모두 거짓이고 u·d는 0이다. 학습은 train.py --wrist일 때만 쓴다.
 - 나누기(설계 §4). 셋 다 (학습, 검증, 시험) 프레임 번호를 세션·시각 순서로 낸다.
@@ -37,7 +37,7 @@
 dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), wrist·wrist_depth (N, 3) float32와 wrist_ok (N,) bool
-(손목 정답, 위), wrist_method (S,) 문자열("calibration" | "ulnar" | ""), sessions·hands (S,) 문자열,
+(손목 정답, 위), wrist_method (S,) 문자열("calibration+zero" | "calibration" | "ulnar" | ""), sessions·hands (S,) 문자열,
 length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wear (S,) int64(착용 번호, wear_episodes — 옛 dataset.npz에는 없고 그때는
 rewear로 만든다), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
 label_names (K,) 문자열, input_files (3,) 문자열(verify_sync.INPUTS)과 inputs (S, 3) 문자열(그 세션 sync.json의 입력 SHA-256 지문).
@@ -224,7 +224,7 @@ def session_data(data, name, bins=BINS, standardized=True):
     if palmar < MIN_PALMAR:
         return None, lines + [f"  건너뜀: 거울을 되돌린 손에서 엄지가 손바닥 쪽인 프레임 {palmar:.1%}(문턱 {MIN_PALMAR:.0%}. 실제 손 모양이 아니거나"
                               " 반쯤 거울 — 거울·손 처리를 볼 것)"]
-    labelled = ((p["prompt"] >= 0) & (p["edge"] == 0) & (p["classId"] != pairs.PAUSE_CLASS) & (p["classId"] != pairs.NEUTRAL_CLASS)
+    labelled = ((p["prompt"] >= 0) & (p["edge"] == 0) & (p["classId"] != pairs.PAUSE_CLASS) & ~np.isin(p["classId"], pairs.CALIB_CLASSES)
                 & (p["flag"] != "wrong"))
     try:
         w, wrist_lines = wrist.session_wrist(data, name)

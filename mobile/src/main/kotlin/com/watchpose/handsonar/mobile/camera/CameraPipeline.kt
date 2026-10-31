@@ -72,6 +72,9 @@ class CameraPipeline(
     /** 추적하는 손(워치를 찬 손). 준비 화면에서 고르고, 분석 스레드가 프레임마다 [HandTracker]에 넘긴다. */
     @Volatile var trackedHand: TrackedHand = TrackedHand.LEFT
 
+    /** 참이면 손이 하나만 보일 때 이름과 상관없이 그 손을 추적한다([HandTracker.anyHand], 기준 자세 동안). */
+    @Volatile var anyHand: Boolean = false
+
     @MainThread
     fun start(owner: LifecycleOwner, smallestWidthDp: Int, displayRotation: Int) {
         val future = ProcessCameraProvider.getInstance(context)
@@ -156,6 +159,7 @@ class CameraPipeline(
             frameWidth = mirrored.width
             frameHeight = mirrored.height
             t.hand = trackedHand
+            t.anyHand = anyHand
             onFrame(CameraFrame(mirrored, t.detect(mirrored, frameNs)))
             delegate = t.delegate
             if (lastFrameNs > 0 && frameNs > lastFrameNs) {

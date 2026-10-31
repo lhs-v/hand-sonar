@@ -29,6 +29,7 @@ import com.watchpose.handsonar.shared.CalibrationGate
 import com.watchpose.handsonar.shared.CalibrationGeometry
 import com.watchpose.handsonar.shared.CalibrationInput
 import com.watchpose.handsonar.shared.CalibrationMeta
+import com.watchpose.handsonar.shared.CalibrationStep
 import com.watchpose.handsonar.shared.CameraMeta
 import com.watchpose.handsonar.shared.ChirpCheck
 import com.watchpose.handsonar.shared.ChirpHeard
@@ -98,6 +99,8 @@ data class SummaryInfo(
  * [heldMs]는 조건이 이어진 시간, [holdMs]는 넘어가는 데 필요한 시간이다.
  */
 data class CalibrationUi(
+    /** 옆면 차례(엄지가 카메라 쪽, 손 각도가 손등·손바닥 쪽 꺾임)인가. 아니면 정면(손 각도가 새끼·엄지 쪽 꺾임). */
+    val side: Boolean,
     val handDeg: Double?,
     val forearmDeg: Double?,
     val handOk: Boolean,
@@ -156,6 +159,8 @@ data class UiState(
     val watchLinkLost: Boolean = false,
     /** 기준 자세 단계(또는 그 단계에서 일시정지)면 판정 모습, 아니면 null. */
     val calibration: CalibrationUi? = null,
+    /** 기준 자세의 지금 차례(shared Labels.CALIBRATION_IDS의 번호, 0 = 옆면). */
+    val calibStep: Int = 0,
     val busy: Boolean = false,
     // 수집 뒤
     val summary: SummaryInfo? = null,
@@ -249,6 +254,7 @@ class SessionController(private val app: Application) {
     private var gateFrameNs = 0L
     private var gatePhaseNs = -1L // 판정기가 따르는 CALIB 단계의 시작 시각(바뀌면 — 처음이거나 일시정지 뒤 다시 — 판정기를 비운다)
     private var calibration: CalibrationMeta? = null
+    private var sideStep: CalibrationStep? = null // 옆면 차례 결과(정면까지 마치면 meta.json에 함께 적는다)
     @Volatile private var tilt: Tilt? = null
     @Volatile private var tiltAtNs = 0L
     private val tiltListener = MessageClient.OnMessageReceivedListener { event ->
@@ -444,6 +450,7 @@ class SessionController(private val app: Application) {
         gateFrameNs = 0L
         gatePhaseNs = -1L
         calibration = null
+        sideStep = null
         sessionTicks = 0
         linkTicks = 0
         linkSeen = false
@@ -491,7 +498,7 @@ class SessionController(private val app: Application) {
     fun skipCalibration() {
         val r = runner ?: return
         if (r.phase != RunnerPhase.CALIB) return
-        calibration = CalibrationMeta(SKIP, checksNow(SystemClock.elapsedRealtimeNanos()), null, null, 0)
+        calibration = CalibrationMeta(SKIP, checksNow(SystemClock.elapsedRealtimeNanos()), sideStep, null)
         r.skipCalibration(SystemClock.elapsedRealtimeNanos())
         state.update { it.copy(calibration = null) }
     }
@@ -628,6 +635,7 @@ class SessionController(private val app: Application) {
                 else -> Unit
             }
         }
+        camera.anyHand = r.calibrating // 옆면에서 손 이름이 바뀌어도 하나뿐인 손을 놓치지 않게(기준 자세 동안만)
         if (r.phase == RunnerPhase.CALIB) calibrate(r, now)
         // 보일 동작: 동작 중이면 지금 동작, 일시정지면 다시 시작할 동작(끝부터 다시면 없음)
         val shownIndex = when (r.phase) {
@@ -655,13 +663,15 @@ class SessionController(private val app: Application) {
                 elapsedSec = (r.activeNs(now) / 1_000_000_000L).toInt(),
                 watchLinkLost = linkSeen && now - tiltAtNs > LINK_LOST_MS * 1_000_000,
                 calibration = if (r.calibrating) it.calibration else null,
+                calibStep = r.calibStep,
             )
         }
     }
 
     /**
      * 기준 자세 단계에서 새 카메라 프레임이 왔으면 판정에 넣는다. 손: 그림 평면의 각(손목 → 중지 MCP, 그림 속 수직선은 폰 가속도로)과 손가락
-     * 펴짐. 팔뚝: 워치 기울기(받은 지 1 s 안일 때만). 2 s 이어지면 그 유지 구간을 넘기고 첫 동작으로 간다.
+     * 펴짐(정면만 — 옆면은 손가락이 겹쳐 그림 길이 비가 흔들린다). 팔뚝: 워치 기울기(받은 지 1 s 안일 때만). 2 s 이어지면 그 유지 구간을
+     * 넘긴다: 옆면이면 정면 차례로, 정면이면 첫 동작으로 간다. 옆면에서는 그림 평면 각이 손등·손바닥 쪽 꺾임이고, 정면에서는 새끼·엄지 쪽 꺾임이다.
      * CALIB 단계가 새로 시작됐으면(처음이거나 일시정지 뒤) 판정기를 비우고, 그 단계 시작 전에 찍힌 프레임은 넣지 않는다(멈춘 시간이 유지로 세지 않게).
      */
     private fun calibrate(r: SessionRunner, now: Long) {
@@ -677,16 +687,18 @@ class SessionController(private val app: Application) {
         val h = f.bitmap.height
         val up = sensors?.latestAccel?.let { CalibrationGeometry.projectedUp(it, displayRotation) }
         val handDeg = if (image != null && up != null) CalibrationGeometry.handInPlaneDeg(image, w, h, up) else null
-        val fingers = image != null && CalibrationGeometry.fingersStraight(image, w, h)
+        val side = r.calibrationId == Labels.NEUTRAL_SIDE_ID
+        val fingers = side || (image != null && CalibrationGeometry.fingersStraight(image, w, h))
         val forearmDeg = freshTilt(now)?.let { CalibrationGeometry.forearmDeg(it.values()) }
         val st = gate.update(CalibrationInput(f.hand.frameNs, handDeg, fingers, forearmDeg))
         state.update {
-            it.copy(calibration = CalibrationUi(handDeg, forearmDeg, st.handOk, st.fingersOk, st.forearmOk, st.heldMs, gate.holdMs))
+            it.copy(calibration = CalibrationUi(side, handDeg, forearmDeg, st.handOk, st.fingersOk, st.forearmOk, st.heldMs, gate.holdMs))
         }
         val start = st.holdStartNs
         if (st.done && start != null) {
-            calibration = CalibrationMeta(OK, checksNow(now), st.handMedianDeg, st.forearmMedianDeg, st.heldMs)
-            r.calibrated(start, now)
+            val step = CalibrationStep(st.handMedianDeg, st.forearmMedianDeg, st.heldMs)
+            if (side) sideStep = step else calibration = CalibrationMeta(OK, checksNow(now), sideStep, step)
+            r.calibrated(start, now) // 옆면이면 정면 차례가 새로 시작하고(판정기는 차례 시작 시각이 바뀌어 비워진다), 정면이면 첫 동작
             state.update { it.copy(calibration = null) }
         }
     }
@@ -717,6 +729,7 @@ class SessionController(private val app: Application) {
         val endPlayNs = endMarkerPlayNs
         val chirps = synchronized(chirpLock) { chirpLog.toList() }
         val calib = calibration // 다음 세션이 지우기 전에 잡아 둔다
+        camera.anyHand = false
         val linkRatio = if (sessionTicks > 0) linkTicks.toDouble() / sessionTicks else null
         state.update { it.copy(busy = true, phase = r.phase, calibration = null) }
         scope.launch {

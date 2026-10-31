@@ -30,8 +30,15 @@ object Labels {
     /** 일시정지 기록의 번호. */
     const val PAUSE_ID = -2
 
-    /** 기준 자세(세션 처음, 팔뚝과 손을 함께 세운 평행 자세 — PC가 카메라와 워치 방향을 맞추고 손목 각도의 0을 잡는 데 쓴다)의 번호. */
+    /**
+     * 기준 자세(세션 처음, 팔뚝과 손을 함께 세운 평행 자세)의 번호. 두 번 잡는다: 옆면(엄지가 카메라 쪽 — 손등·손바닥 쪽 꺾임이 화면에 보임)
+     * 다음 정면(손바닥이 카메라 쪽 — 새끼·엄지 쪽 꺾임이 화면에 보임, 본편과 같은 방향이라 PC가 손목 각도의 0을 여기서 잡는다).
+     */
     const val NEUTRAL_ID = -3
+    const val NEUTRAL_SIDE_ID = -4
+
+    /** 기준 자세를 잡는 차례: 옆면, 정면. */
+    val CALIBRATION_IDS: List<Int> = listOf(NEUTRAL_SIDE_ID, NEUTRAL_ID)
 
     val FINGERS: IntRange = 0..4
     val ASL: IntRange = 5..14
@@ -65,15 +72,19 @@ object Labels {
 
     val FREE = Gesture(FREE_ID, "free", "자유 동작", "손가락과 손목을 자유롭게 움직이기", HandShape(listOf(E, E, E, E, E)))
     val PAUSE = Gesture(PAUSE_ID, "pause", "일시정지", "", HandShape(listOf(E, E, E, E, E)))
+    val NEUTRAL_SIDE = Gesture(
+        NEUTRAL_SIDE_ID, "neutral_side", "기준 자세 · 옆면", "팔뚝을 세우고 손을 팔과 일자로 위로, 엄지가 카메라를 보게", HandShape(listOf(E, E, E, E, E)),
+    )
     val NEUTRAL = Gesture(
-        NEUTRAL_ID, "neutral", "기준 자세", "팔뚝을 세우고 손을 팔과 일자로 곧게 펴기(손바닥은 카메라 쪽)", HandShape(listOf(E, E, E, E, E)),
+        NEUTRAL_ID, "neutral", "기준 자세 · 정면", "손목은 그대로 두고 팔뚝만 돌려 손바닥이 카메라를 보게", HandShape(listOf(E, E, E, E, E)),
     )
 
-    /** 번호로 동작을 찾는다(0–17, [FREE_ID], [PAUSE_ID], [NEUTRAL_ID]). */
+    /** 번호로 동작을 찾는다(0–17, [FREE_ID], [PAUSE_ID], [NEUTRAL_ID], [NEUTRAL_SIDE_ID]). */
     fun byId(id: Int): Gesture = when (id) {
         FREE_ID -> FREE
         PAUSE_ID -> PAUSE
         NEUTRAL_ID -> NEUTRAL
+        NEUTRAL_SIDE_ID -> NEUTRAL_SIDE
         in 0..17 -> ALL[id]
         else -> throw IllegalArgumentException("없는 동작 번호: $id")
     }

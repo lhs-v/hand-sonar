@@ -42,6 +42,12 @@ class HandTracker(private val context: Context) : AutoCloseable {
     @Volatile var hand: TrackedHand = TrackedHand.LEFT
 
     /**
+     * 참이면 추적하는 손 이름의 손이 없어도 화면에 손이 하나뿐일 때 그 손을 쓴다. 기준 자세 옆면(엄지가 카메라 쪽)에서는 MediaPipe가
+     * 왼손·오른손을 헷갈릴 수 있어서 그 단계 동안만 켠다([CameraPipeline.anyHand]).
+     */
+    @Volatile var anyHand: Boolean = false
+
+    /**
      * 쓰는 계산 장치("GPU" | "CPU"). CPU만으로는 폴드8에서 프레임당 33 ms를 넘어 초당 약 15–18이었다(2026-10-27 실기기).
      * GPU를 먼저 쓰고, 만들거나 돌리다 실패하면 CPU로 바꿔 계속한다.
      */
@@ -91,6 +97,10 @@ class HandTracker(private val context: Context) : AutoCloseable {
                 best = i
                 bestScore = category.score()
             }
+        }
+        if (best < 0 && anyHand && count == 1) { // 손이 하나뿐이면 이름이 달라도 그 손(기준 자세 옆면)
+            best = 0
+            bestScore = result.handedness().getOrNull(0)?.firstOrNull()?.score() ?: 0f
         }
         val points = result.landmarks().getOrNull(best)
         val worldPoints = result.worldLandmarks().getOrNull(best)

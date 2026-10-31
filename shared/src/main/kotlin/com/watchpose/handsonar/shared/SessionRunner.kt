@@ -37,9 +37,11 @@ enum class RunnerPhase { IDLE, LEAD, CALIB, PROMPT, REST, TAIL, CLOSING, PAUSED,
  * 흐름: [start] → LEAD 1 s(시작 표지음은 부르는 쪽이 start와 함께 낸다) → ([calibrate]면 CALIB) → 동작(2 s씩, 자유 동작은 정한 길이) →
  * 구간이 바뀌면 REST 2 s → … → 마지막 동작 뒤 TAIL 1 s → EndMarkerDue → CLOSING 0.8 s → Finished.
  *
- * - 기준 자세(CALIB, [calibrate]가 참일 때만): 시간으로 끝나지 않는다. 부르는 쪽이 판정([CalibrationGate])을 보고 [calibrated]로
- *   유지 구간을 넘기면 그 구간을 classId [Labels.NEUTRAL_ID]로 적고, [skipCalibration]이면 단계 전체를 "skip"으로 적은 뒤 첫 동작으로 간다.
- *   CALIB 도중 일시정지하면 다시 시작할 때 CALIB를 처음부터 다시 한다. 진행률([progress])에는 CALIB 시간을 넣지 않는다.
+ * - 기준 자세(CALIB, [calibrate]가 참일 때만): [Labels.CALIBRATION_IDS] 차례(옆면 → 정면)로 두 번 잡는다. 시간으로 끝나지 않는다.
+ *   부르는 쪽이 판정([CalibrationGate])을 보고 [calibrated]로 유지 구간을 넘기면 그 구간을 지금 차례의 classId로 적는다. 다음 차례가
+ *   있으면 그 차례를 새로 시작하고(CalibrationStarted), 마지막이면 첫 동작으로 간다. [skipCalibration]이면 지금 차례 전체를 "skip"으로
+ *   적고 남은 차례도 건너뛴다. CALIB 도중 일시정지하면 다시 시작할 때 그 차례를 처음부터 다시 한다. 진행률([progress])에는 CALIB 시간을
+ *   넣지 않는다.
  *
  * - 일시정지([pause]): 안내만 멈춘다(녹음은 부르는 쪽이 계속한다). 동작 도중이면 그 동작을 지금까지로 끊어 "pause"로 적고,
  *   다시 시작([resume])하면 일시정지 구간을 "pause"로 적은 뒤 끊긴 동작을 처음부터 다시 보인다.
@@ -64,6 +66,13 @@ class SessionRunner(val plan: SessionPlan, val calibrate: Boolean = false) {
             RunnerPhase.TAIL, RunnerPhase.CALIB -> -1
             else -> nextPrompt
         }
+
+    /** 기준 자세의 지금 차례([Labels.CALIBRATION_IDS]의 번호, 0 = 옆면). */
+    var calibStep: Int = 0
+        private set
+
+    /** 지금 차례의 classId. */
+    val calibrationId: Int get() = Labels.CALIBRATION_IDS[calibStep]
 
     /** 기준 자세 단계이거나, 그 단계에서 일시정지함(다시 시작하면 기준 자세부터). */
     val calibrating: Boolean
@@ -106,6 +115,7 @@ class SessionRunner(val plan: SessionPlan, val calibrate: Boolean = false) {
         started = true
         startNs = nowNs
         nextPrompt = 0
+        calibStep = 0
         enter(RunnerPhase.LEAD, nowNs, PromptPlanner.LEAD_MS)
     }
 
@@ -141,19 +151,29 @@ class SessionRunner(val plan: SessionPlan, val calibrate: Boolean = false) {
     }
 
     /**
-     * 기준 자세 판정이 [holdStartNs]부터 [nowNs]까지 유지됐다: 그 구간을 classId [Labels.NEUTRAL_ID]로 적고 첫 동작을 시작한다.
-     * 유지 시작은 이 CALIB 단계가 시작된 때보다 앞일 수 없다(앞이면 단계 시작으로 자른다). CALIB가 아니면 아무것도 하지 않는다.
+     * 기준 자세 판정이 [holdStartNs]부터 [nowNs]까지 유지됐다: 그 구간을 지금 차례의 classId로 적는다. 다음 차례가 있으면 그 차례를 시작하고
+     * (CalibrationStarted), 마지막 차례면 첫 동작을 시작한다. 유지 시작은 이 차례가 시작된 때보다 앞일 수 없다(앞이면 차례 시작으로 자른다).
+     * CALIB가 아니면 아무것도 하지 않는다.
      */
     fun calibrated(holdStartNs: Long, nowNs: Long): List<RunnerEvent> {
         if (phase != RunnerPhase.CALIB) return emptyList()
-        out += PromptRecord(out.size, 0, Labels.NEUTRAL_ID, Labels.NEUTRAL.name, maxOf(phaseStartNs, minOf(holdStartNs, nowNs)), nowNs, "")
+        val id = calibrationId
+        out += PromptRecord(out.size, 0, id, Labels.byId(id).name, maxOf(phaseStartNs, minOf(holdStartNs, nowNs)), nowNs, "")
+        if (calibStep + 1 < Labels.CALIBRATION_IDS.size) {
+            calibTotalNs += nowNs - phaseStartNs
+            calibStep++
+            val events = mutableListOf<RunnerEvent>()
+            beginCalibration(nowNs, events)
+            return events
+        }
         return leaveCalibration(nowNs)
     }
 
-    /** 기준 자세를 건너뛴다: 이 CALIB 단계 전체를 "skip"으로 적고 첫 동작을 시작한다. CALIB가 아니면 아무것도 하지 않는다. */
+    /** 기준 자세를 건너뛴다: 지금 차례 전체를 "skip"으로 적고 남은 차례도 건너뛰어 첫 동작을 시작한다. CALIB가 아니면 아무것도 하지 않는다. */
     fun skipCalibration(nowNs: Long): List<RunnerEvent> {
         if (phase != RunnerPhase.CALIB) return emptyList()
-        out += PromptRecord(out.size, 0, Labels.NEUTRAL_ID, Labels.NEUTRAL.name, phaseStartNs, nowNs, FLAG_SKIP)
+        val id = calibrationId
+        out += PromptRecord(out.size, 0, id, Labels.byId(id).name, phaseStartNs, nowNs, FLAG_SKIP)
         return leaveCalibration(nowNs)
     }
 
@@ -261,7 +281,7 @@ class SessionRunner(val plan: SessionPlan, val calibrate: Boolean = false) {
         const val FLAG_WRONG = "wrong"
         const val FLAG_PAUSE = "pause"
 
-        /** 기준 자세를 건너뜀(prompts.csv classId [Labels.NEUTRAL_ID] 줄). */
+        /** 기준 자세를 건너뜀(prompts.csv의 기준 자세 줄, [Labels.CALIBRATION_IDS]). */
         const val FLAG_SKIP = "skip"
         private val TIMED = setOf(RunnerPhase.LEAD, RunnerPhase.PROMPT, RunnerPhase.REST, RunnerPhase.TAIL, RunnerPhase.CLOSING)
         private val PAUSABLE = setOf(RunnerPhase.LEAD, RunnerPhase.CALIB, RunnerPhase.PROMPT, RunnerPhase.REST, RunnerPhase.TAIL)

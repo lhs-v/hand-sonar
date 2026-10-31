@@ -88,7 +88,7 @@ fun CollectScreen(ui: UiState, c: SessionController) {
                 // 손 그림은 지금 동작 이름 바로 옆에만 둔다(사용자가 "다음" 옆 그림을 다음 동작으로 읽어 헷갈림, 2026-10-27 실기기).
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                     val shape = when {
-                        ui.phase == RunnerPhase.CALIB -> Labels.NEUTRAL.shape
+                        ui.phase == RunnerPhase.CALIB -> if (Labels.CALIBRATION_IDS[ui.calibStep] == Labels.NEUTRAL_ID) Labels.NEUTRAL.shape else null
                         ui.phase == RunnerPhase.PROMPT || ui.phase == RunnerPhase.PAUSED -> ui.prompt?.shape
                         else -> null
                     }
@@ -155,16 +155,20 @@ private fun CalibrationLines(cal: CalibrationUi?, watchTilt: Boolean) {
             else -> StatusRow("팔뚝", "%.0f° — 팔뚝을 똑바로 세우세요".format(forearm ?: 0.0), Level.BAD)
         }
         val hand = cal?.handDeg
+        val label = if (cal?.side == true) "손등 쪽" else "옆 꺾임" // 옆면은 손등·손바닥 쪽, 정면은 새끼·엄지 쪽 꺾임이 화면에 보인다
         when {
-            hand == null -> StatusRow("손", "안 보임", Level.BAD)
-            cal.handOk -> StatusRow("손", "%.0f° ✓".format(hand), Level.OK)
-            else -> StatusRow("손", "%.0f° — 손을 위로 곧게".format(hand), Level.BAD)
+            hand == null -> StatusRow(label, "손이 안 보임", Level.BAD)
+            cal.handOk -> StatusRow(label, "%.0f° ✓".format(hand), Level.OK)
+            else -> StatusRow(label, "%.0f° — 손을 팔과 일자로".format(hand), Level.BAD)
         }
-        if (cal?.fingersOk == true) StatusRow("손가락", "폄 ✓", Level.OK) else StatusRow("손가락", "모두 펴세요", Level.BAD)
+        if (cal?.side != true) {
+            if (cal?.fingersOk == true) StatusRow("손가락", "폄 ✓", Level.OK) else StatusRow("손가락", "모두 펴세요", Level.BAD)
+        }
     }
 }
 
 private fun segmentTitle(ui: UiState): String {
+    if (ui.phase == RunnerPhase.CALIB) return "기준 자세 ${ui.calibStep + 1}/${Labels.CALIBRATION_IDS.size}"
     if (ui.phase == RunnerPhase.TAIL || ui.phase == RunnerPhase.CLOSING) return "마무리"
     if (ui.segment == 0) return "세션 준비"
     val kind = when (ui.segment) {
@@ -178,7 +182,7 @@ private fun segmentTitle(ui: UiState): String {
 
 private fun mainText(ui: UiState): String = when (ui.phase) {
     RunnerPhase.IDLE, RunnerPhase.LEAD -> "준비"
-    RunnerPhase.CALIB -> Labels.NEUTRAL.name
+    RunnerPhase.CALIB -> Labels.byId(Labels.CALIBRATION_IDS[ui.calibStep]).name
     RunnerPhase.PROMPT -> ui.prompt?.name.orEmpty()
     RunnerPhase.REST -> "쉬기"
     RunnerPhase.TAIL, RunnerPhase.CLOSING -> "마무리"
@@ -188,7 +192,7 @@ private fun mainText(ui: UiState): String = when (ui.phase) {
 
 private fun phaseHint(ui: UiState): String = when (ui.phase) {
     RunnerPhase.IDLE, RunnerPhase.LEAD -> "표지음이 울리면 시작합니다"
-    RunnerPhase.CALIB -> Labels.NEUTRAL.hint
+    RunnerPhase.CALIB -> Labels.byId(Labels.CALIBRATION_IDS[ui.calibStep]).hint
     RunnerPhase.REST -> "손을 편하게 두세요"
     RunnerPhase.TAIL, RunnerPhase.CLOSING -> "손을 그대로 두세요"
     RunnerPhase.PAUSED -> "계속을 누르면 이어서 합니다"

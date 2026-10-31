@@ -21,12 +21,15 @@ data class CameraMeta(
     val displayRotation: Int? = null,
 )
 
+/** 기준 자세 한 차례의 결과: 유지 구간 프레임들의 손(그림 평면)·팔뚝 각 중앙값(도, 모르면 null)과 유지 시간. */
+data class CalibrationStep(val handDeg: Double?, val forearmDeg: Double?, val holdMs: Long)
+
 /**
- * meta.json `calibration`: 기준 자세 단계의 결과(설계: 손목 상태 학습). [result]는 "ok"(판정 통과) | "skip"(건너뜀)이다.
- * [checks]는 "hand+forearm"(워치 기울기도 봄) | "hand"(워치 기울기를 못 받아 손만 봄). 각도는 유지 구간 프레임들의 중앙값(도)이고 모르면 null.
- * 유지 구간 시각은 prompts.csv의 classId −3 줄에 있다.
+ * meta.json `calibration`: 기준 자세 단계의 결과(설계: 손목 상태 학습). [result]는 "ok"(두 차례 모두 통과) | "skip"(건너뜀)이다.
+ * [checks]는 "hand+forearm"(워치 기울기도 봄) | "hand"(워치 기울기를 못 받아 손만 봄). [side]·[front]는 옆면·정면 차례(통과하지 않았으면 null).
+ * 유지 구간 시각은 prompts.csv의 classId −4(옆면)·−3(정면) 줄에 있다.
  */
-data class CalibrationMeta(val result: String, val checks: String, val handDeg: Double?, val forearmDeg: Double?, val holdMs: Long)
+data class CalibrationMeta(val result: String, val checks: String, val side: CalibrationStep?, val front: CalibrationStep?)
 
 /** 표지음 하나의 기록. [micFrame]은 phone_audio.wav 안에서 찾은 시작 샘플, [elapsedNs]는 그 샘플의 폰 시각. 못 찾으면 found=false. */
 data class MarkerMeta(val found: Boolean, val playNs: Long, val micFrame: Double?, val elapsedNs: Long?, val ratio: Double?)
@@ -124,7 +127,7 @@ data class SessionMeta(
             "context" to context.toMap(),
             "sensors" to sensors?.toMap(),
             "calibration" to calibration?.let {
-                linkedMapOf<String, Any?>("result" to it.result, "checks" to it.checks, "handDeg" to it.handDeg, "forearmDeg" to it.forearmDeg, "holdMs" to it.holdMs)
+                linkedMapOf<String, Any?>("result" to it.result, "checks" to it.checks, "side" to it.side?.let(::stepMap), "front" to it.front?.let(::stepMap))
             },
             "video" to video?.let {
                 linkedMapOf<String, Any?>("file" to it.file, "width" to it.width, "height" to it.height, "frames" to it.frames, "ok" to it.ok)
@@ -133,6 +136,8 @@ data class SessionMeta(
             "cancelled" to cancelled,
         ),
     )
+
+    private fun stepMap(s: CalibrationStep) = linkedMapOf<String, Any?>("handDeg" to s.handDeg, "forearmDeg" to s.forearmDeg, "holdMs" to s.holdMs)
 
     private fun markerMap(m: MarkerMeta) = linkedMapOf<String, Any?>(
         "found" to m.found, "playNs" to m.playNs, "micFrame" to m.micFrame, "elapsedNs" to m.elapsedNs, "ratio" to m.ratio,
