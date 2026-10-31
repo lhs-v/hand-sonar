@@ -103,12 +103,17 @@ def run_gt(saved):
     return str(saved["gt"]) if "gt" in saved else "mediapipe"
 
 
+def run_row_norm(saved):
+    """그 실행 dataset.npz가 줄 단위 정규화로 만든 것인가. 이 칸이 없는 옛 실행은 거짓이다."""
+    return bool(saved["row_norm"]) if "row_norm" in saved else False
+
+
 def predict_session(data, run, saved, k):
     """(세션 k 학습 자료 프레임의 예측 (M, 20, 3), 목표 (M, 20, 3), 장치). 창은 지금 처리 폴더에서 다시 만든다."""
     import torch
     import train
     name = str(saved["sessions"][k])
-    part, lines = dataset.session_data(data, name, gt=run_gt(saved))
+    part, lines = dataset.session_data(data, name, gt=run_gt(saved), row_norm=run_row_norm(saved))
     if part is None:
         raise ValueError(f"{name}: 학습 자료를 다시 만들지 못함 — " + " / ".join(lines))
     mine = saved["session"] == k

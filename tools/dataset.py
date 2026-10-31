@@ -25,6 +25,10 @@
   관절이 없는 프레임도 뺀다. hamer.npz가 없거나 프레임이 landmarks.csv와 다른 세션은 건너뛴다(한 자료에 두 정답을 섞지 않는다). 11세션에서
   견주면 HaMeR가 손가락 구분은 조금 낫고 굽힘 크기를 1.4–1.8배 크게 읽었다(MediaPipe는 카메라 쪽 깊이를 눌러 읽음 — 보고서
   hand-sonar/2026-10-31-hamer-wrist-check). 손목 정답은 gt와 상관없이 wrist.session_wrist가 고른 3D를 쓴다.
+- 줄 단위 정규화(row_norm, 2026-10-31, 기본 끔): 원본 프로파일의 줄마다 600칸 |값| 합으로 나누고(세션 중앙값을 곱해 크기 유지) 차분을 그것으로
+  다시 낸다(row_normalized). 워치8 녹음은 받은 소리 전체가 줄마다 약 0.3%씩 함께 흔들려(공개 프로파일 0.13%) 손이 멈춰도 손 자리 칸이 그
+  흔들림을 따라 바뀐다(멈춘 줄 상관 0.97). 줄 합으로 나누면 그 몫이 상쇄돼 멈춘 동안 손 자리 변화가 약 6배 줄고, 속도–세기 상관이 0.30–0.35에서
+  0.46–0.50으로 오른다(보고서 hand-sonar/2026-10-31-signal-gap). 3줄 중앙값 뒤의 profiles.npy에 건다.
 - 나누기(설계 §4). 셋 다 (학습, 검증, 시험) 프레임 번호를 세션·시각 순서로 낸다.
   - session_split(세션 단위): 착용 묶음 통째로 나눈다(계획 6 검토 고침 M1). 착용(wear_episodes): 시각(meta start wallMs) 순으로 meta.json
     rewear가 참인 세션에서 새 착용이 시작해 다음 그런 세션 전까지 간다. 경계에는 자료에 들지 않은 세션(휴지통·끝나지 않음·처리 안 됨)의
@@ -43,7 +47,7 @@ dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), wrist·wrist_depth (N, 3) float32와 wrist_ok (N,) bool
 (손목 정답, 위), wrist_method (S,) 문자열("calibration" | "ulnar" | ""), wrist_source (S,) 문자열(손 3D: "hamer" |
-"mediapipe" | ""), gt () 문자열(손가락 정답의 3D, 위 — 이 칸이 없는 옛 dataset.npz는 "mediapipe"), sessions·hands (S,) 문자열,
+"mediapipe" | ""), gt () 문자열(손가락 정답의 3D, 위 — 이 칸이 없는 옛 dataset.npz는 "mediapipe"), row_norm () bool(줄 단위 정규화, 위 — 없으면 거짓), sessions·hands (S,) 문자열,
 length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wear (S,) int64(착용 번호, wear_episodes — 옛 dataset.npz에는 없고 그때는
 rewear로 만든다), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
 label_names (K,) 문자열, input_files (3,) 문자열(verify_sync.INPUTS)과 inputs (S, 3) 문자열(그 세션 sync.json의 입력 SHA-256 지문).
@@ -191,8 +195,19 @@ def windows(raw, diff, rows, block=512, bins=BINS, standardized=True):
     return out
 
 
-def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe"):
-    """세션 하나: (학습 자료 dict 또는 None, 보고 줄). bins·standardized는 창 x를 만드는 방식(windows), gt는 손가락 정답의 3D(GT_SOURCES)."""
+def row_normalized(raw):
+    """줄 단위 정규화: 원본 프로파일 (600, R)의 줄마다 600칸 |값| 합으로 나누고 세션 중앙값을 곱한 원본 (600, R)과, 그것으로 다시 낸 차분
+    (|원본[t]| − |원본[t−1]|, (600, R−1)). 합이 0인 줄(직접 경로가 없는 줄)은 중앙값으로 나눈다(그대로 둠)."""
+    a = np.asarray(raw, dtype=np.float64)
+    total = np.abs(a).sum(axis=0)
+    med = float(np.median(total[total > 0])) if (total > 0).any() else 1.0
+    norm = a * (med / np.where(total > 0, total, med))[None, :]
+    return norm, np.abs(norm[:, 1:]) - np.abs(norm[:, :-1])
+
+
+def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe", row_norm=False):
+    """세션 하나: (학습 자료 dict 또는 None, 보고 줄). bins·standardized는 창 x를 만드는 방식(windows), gt는 손가락 정답의 3D(GT_SOURCES),
+    row_norm은 줄 단위 정규화(row_normalized)."""
     if gt not in GT_SOURCES:
         raise ValueError(f"정답 {gt!r}은 {'·'.join(GT_SOURCES)} 중 하나여야 함")
     out = os.path.join(data, "processed", name)
@@ -209,6 +224,8 @@ def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe"):
     diff = np.load(os.path.join(out, "diff_profiles.npy"), mmap_mode="r", allow_pickle=False)
     if raw.shape != (600, len(ok)) or diff.shape != (600, len(ok) - 1):
         return None, [f"{name}: 건너뜀(profiles.npy {raw.shape}·diff_profiles.npy {diff.shape}와 rows.npz {len(ok)}줄이 맞지 않음 — profiles.py를 다시)"]
+    if row_norm:  # 원본을 메모리에 올려 줄마다 나누고 차분을 다시 낸다(창은 아래에서 같은 식으로 자른다)
+        raw, diff = row_normalized(raw)
     marks = hs_io.read_landmarks(folder)
     if not np.array_equal(marks.frame_ns, p["frameNs"]):
         return None, [f"{name}: 건너뜀(pairs.csv와 landmarks.csv의 프레임이 다름 — pairs.py를 다시)"]
@@ -256,7 +273,8 @@ def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe"):
         w = {"u": np.zeros((len(use), 3), np.float32), "depth": np.zeros((len(use), 3), np.float32), "ok": np.zeros(len(use), bool), "method": "",
              "source": ""}
     length_mm = float(np.median(length[good])) * 1000.0
-    lines.append(f"  L(손목–새끼 MCP 중앙값) {length_mm:.1f} mm, 엄지가 손바닥 쪽인 프레임 {palmar:.1%}, 라벨 붙은 프레임 {int((use & labelled).sum())}개")
+    lines.append(f"  L(손목–새끼 MCP 중앙값) {length_mm:.1f} mm, 엄지가 손바닥 쪽인 프레임 {palmar:.1%}, 라벨 붙은 프레임 {int((use & labelled).sum())}개"
+                 + (", 줄 단위 정규화(줄마다 600칸 |값| 합으로 나눔)" if row_norm else ""))
     part = {"x": windows(raw, diff, p["row"][use], bins=bins, standardized=standardized), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
             "row": p["row"][use], "prompt": p["prompt"][use].astype(np.int32), "class_id": p["classId"][use].astype(np.int16),
             "flag": p["flag"][use], "edge": p["edge"][use] == 1, "labelled": labelled[use], "v9": v9.astype(np.float32),
@@ -291,9 +309,9 @@ def merge(parts):
     return ds
 
 
-def build(data, names=(), bins=BINS, standardized=True, gt="mediapipe"):
+def build(data, names=(), bins=BINS, standardized=True, gt="mediapipe", row_norm=False):
     """(학습 자료 dict 또는 None, 보고 줄). 세션 이름이 없으면 쓸 수 있는 세션 모두. bins·standardized는 창 x를 만드는 방식(windows),
-    gt는 손가락 정답의 3D(GT_SOURCES)."""
+    gt는 손가락 정답의 3D(GT_SOURCES), row_norm은 줄 단위 정규화(row_normalized)."""
     parts, lines = [], []
     for name, why in hs_io.chosen(data, names):
         if not why:
@@ -302,7 +320,7 @@ def build(data, names=(), bins=BINS, standardized=True, gt="mediapipe"):
             lines.append(f"{name}: 건너뜀({why})")
             continue
         try:
-            part, more = session_data(data, name, bins, standardized, gt)
+            part, more = session_data(data, name, bins, standardized, gt, row_norm)
         except Exception as e:  # noqa: BLE001  한 세션이 넘어져도 다른 세션은 쓴다
             part, more = None, [f"{name}: 처리 중 오류로 건너뜀({type(e).__name__}: {e})"]
         lines += more
@@ -313,6 +331,7 @@ def build(data, names=(), bins=BINS, standardized=True, gt="mediapipe"):
     ds = merge(parts)
     ds["wear"] = wear_episodes(ds["wall_ms"], ds["rewear"], rewear_marks(data))
     ds["gt"] = np.array(gt)
+    ds["row_norm"] = np.array(bool(row_norm))
     return ds, lines
 
 
@@ -471,8 +490,9 @@ def main():
     parser.add_argument("--out", help="dataset.npz 경로(없으면 보고만 하고 쓰지 않음)")
     parser.add_argument("--save-x", action="store_true", help="창 x도 dataset.npz에 쓴다(세션당 약 170 MB)")
     parser.add_argument("--gt", choices=GT_SOURCES, default="mediapipe", help="손가락 정답의 3D(hamer는 처리 폴더 hamer.npz가 있는 세션만)")
+    parser.add_argument("--row-norm", action="store_true", help="줄 단위 정규화: 원본 프로파일 줄마다 600칸 |값| 합으로 나누고 차분을 다시 낸다")
     args = parser.parse_args()
-    ds, lines = build(args.data, args.sessions, gt=args.gt)
+    ds, lines = build(args.data, args.sessions, gt=args.gt, row_norm=args.row_norm)
     print("\n".join(lines))
     if ds is None:
         print("쓸 세션이 없음")

@@ -2,7 +2,7 @@
 
     python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 100]
                              [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--shift 5] [--mask] [--wrist 0.1]
-                             [--gt mediapipe|hamer] [--save-x] [세션 …]
+                             [--gt mediapipe|hamer] [--row-norm] [--save-x] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
   report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다. dataset.npz는 기본으로 창 x 없이 row·목표·라벨·입력 지문만 쓴다(--save-x면 창도).
@@ -24,6 +24,8 @@
 - 손가락 정답(--gt, 2026-10-31): mediapipe(기본 — 논문 수치 MPJPE 7.87 mm와 같은 정답이라 직접 견줄 수 있다) 또는 hamer(HaMeR 3D, 처리
   폴더 hamer.npz가 있는 세션만. dataset 머리말). 프레임 거르기와 L(mm)은 둘 다 MediaPipe로 같다. metrics.json·model.pt gt에 남기고, 실행
   이름(--run 없을 때)과 그림 제목에 붙인다.
+- 줄 단위 정규화(--row-norm, 2026-10-31): 원본 프로파일 줄마다 600칸 |값| 합으로 나누고 차분을 다시 낸 뒤 창을 만든다(dataset 머리말).
+  워치8 녹음의 줄 전체 흔들림(약 0.3%)이 손 자리 칸에 남기는 몫을 없앤다. metrics.json rowNorm·model.pt row_norm에 남기고 실행 이름에 붙인다.
 - 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs
   (100)와 벽시계 상한 --max-minutes(20분, 그 epoch 뒤 멈춤)를 둔다. 학습·검증 손실이 nan·inf면 이유를 적고 끝 코드 1로 멈춘다.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
@@ -704,6 +706,7 @@ def main():
                         help="손목 상태 다중 과제: 워치 기준 손 방향 3값을 함께 학습하고 손실에 이 무게로 더한다(0이면 끔, 예 0.1)")
     parser.add_argument("--gt", choices=dataset.GT_SOURCES, default="mediapipe",
                         help="손가락 정답의 3D: mediapipe(기본, 논문과 같음) 또는 hamer(처리 폴더 hamer.npz — hamer_keypoints.py)")
+    parser.add_argument("--row-norm", action="store_true", help="줄 단위 정규화: 원본 프로파일 줄마다 600칸 |값| 합으로 나누고 차분을 다시 낸다")
     parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
     if not 0 <= args.shift <= dataset.BINS.start:
@@ -713,7 +716,7 @@ def main():
         print("--wrist는 0 이상")
         return 1
     wide = slice(dataset.BINS.start - args.shift, dataset.BINS.stop + args.shift)
-    ds, lines = dataset.build(args.data, args.sessions, bins=wide, standardized=args.shift == 0, gt=args.gt)
+    ds, lines = dataset.build(args.data, args.sessions, bins=wide, standardized=args.shift == 0, gt=args.gt, row_norm=args.row_norm)
     print("\n".join(lines))
     if ds is None:
         print("쓸 세션이 없음")
@@ -722,7 +725,7 @@ def main():
     mode = args.mode or ("session" if len(ds["sessions"]) >= 2 else "blocks")
     if not args.mode:
         print(f"나누기 {mode}(--mode 없음: 세션 {len(ds['sessions'])}개 — 둘 이상이면 session, 하나면 blocks)")
-    run = args.run or f"{time.strftime('%Y%m%d-%H%M%S')}-{mode}{'' if args.gt == 'mediapipe' else '-' + args.gt}"
+    run = args.run or f"{time.strftime('%Y%m%d-%H%M%S')}-{mode}{'' if args.gt == 'mediapipe' else '-' + args.gt}{'-rownorm' if args.row_norm else ''}"
     folder = os.path.join(args.out or os.path.join(args.data, "processed", "training"), run)
     try:
         parts, block, split, what, lines = split_frames(ds, mode, args)
@@ -748,7 +751,7 @@ def main():
     dataset.save(os.path.join(folder, "dataset.npz"), ds, with_x=args.save_x)
     seed_all(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"{run}: {mode}, 정답 {dataset.GT_NAMES[args.gt]}, 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}프레임, 장치 {device}"
+    print(f"{run}: {mode}, 정답 {dataset.GT_NAMES[args.gt]}{', 줄 단위 정규화' if args.row_norm else ''}, 학습 {len(train)} · 검증 {len(val)} · 시험 {len(test)}프레임, 장치 {device}"
           f"{'(' + torch.cuda.get_device_name(0) + ')' if device == 'cuda' else ' — GPU가 없어 아주 느리다'}")
     x = torch.as_tensor(ds["x"], device=device)
     augment = None
@@ -776,7 +779,7 @@ def main():
     mm = ds["length_mm"][ds["session"]]
     m["splitMpjpeMm"] = {k: float(np.mean(joints.frame_errors(pred.reshape(-1, 20, 3)[v], yy[v]) * mm[v]))
                          for k, v in (("train", train), ("val", val), ("test", test))}
-    m.update({"format": 2, "run": run, "mode": mode, "gt": args.gt, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
+    m.update({"format": 2, "run": run, "mode": mode, "gt": args.gt, "rowNorm": args.row_norm, "sessions": ds["sessions"].tolist(), "lengthMm": ds["length_mm"].tolist(),
               "frames": {"train": int(len(train)), "val": int(len(val)), "test": int(len(test))}, "seed": args.seed,
               "epochs": len(history), "maxEpochs": args.epochs, "maxMinutes": args.max_minutes, "stoppedBy": stopped, "bestEpoch": best_epoch,
               "trainSeconds": seconds,
@@ -787,7 +790,7 @@ def main():
         m["wrist"] = {"weight": args.wrist, "depthWeight": DEPTH_WEIGHT, **wrist_metrics(ds, out[:, FINGER_OUT:FINGER_OUT + WRIST_OUT], train, test)}
     torch.save({"arch": ARCH, "in_chans": 2, "num_classes": int(model.num_classes), "bins": [dataset.BINS.start, dataset.BINS.stop],
                 "window": dataset.WINDOW, "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "wrist": args.wrist,
-                "gt": args.gt,
+                "gt": args.gt, "row_norm": args.row_norm,
                 "state_dict": model.state_dict()},
                os.path.join(folder, "model.pt"))
     hs_io.write_json(os.path.join(folder, "metrics.json"), m)

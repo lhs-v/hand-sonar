@@ -137,6 +137,7 @@ handsonar.keyPassword=android
      - 설치(처음 한 번, 저장소 밖 `../hamer`): `git clone https://github.com/geopavlakos/hamer ../hamer`, 그다음 `python -I tools/hamer_keypoints.py --setup --mano <MANO_RIGHT.pkl>`. 모델 묶음 6.04 GB를 받으면서 체크포인트 2.69 GB와 설정만 꺼내고, MANO 오른손을 chumpy 없는 파일로 바꿔 둡니다.
      - 추가 패키지: `smplx==0.1.28`, `yacs`, `einops`, `pytorch-lightning`, `webdataset`. 렌더러는 쓰지 않습니다.
      - 실행: `python -I tools/hamer_keypoints.py [세션 …]`(GPU, 세션당 약 40초). 영상에 얼굴이 찍혀 있어 PC 안에서만 돌립니다.
+   - 줄 단위 정규화 `--row-norm`: 원본 프로파일의 줄(처프 하나, 12.5 ms)마다 600칸 |값| 합으로 나누고 차분을 다시 냅니다. 워치8 녹음은 받은 소리 전체가 줄마다 약 0.3%씩 함께 흔들려(공개 0.13%) 손이 멈춰도 손 자리 칸이 바뀌는데, 이 몫을 없앱니다. 속도–세기 상관은 0.30–0.35에서 0.46–0.50으로 오르고, 세 세션 블록 학습(씨앗값 3개)의 평균 자세 대비 비는 평균 0.964에서 0.910으로 조금 나아졌습니다(씨앗값 사이 흩어짐과 비슷한 크기). 기본은 끔입니다.
    - 손가락 정답 `--gt hamer`: 손가락 목표도 HaMeR 3D로 만듭니다(`hamer.npz`가 있는 세션만, 프레임 거르기와 L은 MediaPipe 그대로). 기본 `mediapipe`는 논문과 같은 정답이라 논문 수치(MPJPE 7.87 mm)와 직접 견줄 수 있습니다.
      - 11세션에서 견주면 HaMeR가 어느 손가락이 굽었는지는 조금 더 잘 가르고(AUC 0.946–0.963 대 0.929–0.960), 굽힘 크기는 1.4–1.8배 크게 읽었습니다. 손가락도 카메라 쪽으로 굽어, MediaPipe가 깊이를 눌러 읽는 것과 맞습니다.
      - 두 정답은 같은 프레임에서 관절당 중앙 13.6 mm 다릅니다. 실행 이름(`--run`이 없을 때)과 `metrics.json` `gt`에 남고, `render_video.py`는 그 실행의 정답으로 그립니다.

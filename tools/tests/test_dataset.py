@@ -212,6 +212,31 @@ class SessionFolderTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 dataset.session_data(data, NAME, gt="openpose")
 
+    def test_row_norm_drops_a_gain_shared_by_the_whole_row(self):
+        with tempfile.TemporaryDirectory() as data:
+            raw = write_session(data)
+            out = os.path.join(data, "processed", NAME)
+            ds, lines = dataset.build(data, row_norm=True)
+            self.assertIsNotNone(ds, "\n".join(lines))
+            self.assertTrue(bool(ds["row_norm"]))
+            self.assertTrue(any("줄 단위 정규화" in line for line in lines), "\n".join(lines))
+            norm, ndiff = dataset.row_normalized(raw)
+            np.testing.assert_allclose(ds["x"], dataset.windows(norm, ndiff, ds["row"]), atol=1e-5)
+            plain, _ = dataset.build(data)
+            self.assertFalse(bool(plain["row_norm"]))
+            gain = 1 + 0.05 * np.random.default_rng(1).standard_normal(raw.shape[1])  # 줄마다 받은 소리 전체에 같이 곱해진 흔들림
+            shaken = raw * gain[None, :]
+            np.save(os.path.join(out, "profiles.npy"), shaken)
+            np.save(os.path.join(out, "diff_profiles.npy"), np.abs(shaken[:, 1:]) - np.abs(shaken[:, :-1]))
+            np.testing.assert_allclose(dataset.build(data, row_norm=True)[0]["x"], ds["x"], atol=1e-4)  # 정규화하면 흔들림이 없던 것과 같다
+            self.assertGreater(float(np.abs(dataset.build(data)[0]["x"] - plain["x"]).max()), 0.01)  # 정규화하지 않으면 남는다
+
+    def test_row_normalized_scales_rows_to_the_median_sum_and_leaves_empty_rows(self):
+        raw = np.array([[1.0, -2.0, 0.0, 3.0], [1.0, 2.0, 0.0, -1.0]])  # 줄(열)마다 |값| 합 2 · 4 · 0 · 4, 0이 아닌 합의 중앙값 4
+        norm, diff = dataset.row_normalized(raw)
+        np.testing.assert_allclose(norm, [[2.0, -2.0, 0.0, 3.0], [2.0, 2.0, 0.0, -1.0]])
+        np.testing.assert_allclose(diff, np.abs(norm[:, 1:]) - np.abs(norm[:, :-1]))
+
     def test_pairs_made_with_an_old_lag_are_skipped(self):
         with tempfile.TemporaryDirectory() as data:
             write_session(data)
