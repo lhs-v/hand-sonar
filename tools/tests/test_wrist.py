@@ -76,6 +76,24 @@ class YawTest(unittest.TestCase):
         np.testing.assert_allclose(d, [0.0, math.degrees(0.3)], atol=1e-9)
 
 
+class HamerPointsTest(unittest.TestCase):
+    def test_hamer_file_is_used_only_when_frames_match(self):
+        import os
+        import tempfile
+        frames = np.array([10, 20, 30], dtype=np.int64)
+        kp = np.random.default_rng(5).normal(size=(3, 21, 3)).astype(np.float32)
+        kp[1] = np.nan  # HaMeR가 손을 못 본 프레임
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "hamer.npz")
+            self.assertIsNone(wrist.hamer_points(path, frames))  # 파일 없음 → MediaPipe
+            np.savez(path, frame_ns=frames, keypoints=kp, global_orient=np.zeros((3, 3, 3), np.float32))
+            points, has = wrist.hamer_points(path, frames)
+            np.testing.assert_array_equal([True, False, True], has)
+            np.testing.assert_allclose(points[0], kp[0], atol=1e-6)
+            with self.assertRaises(ValueError):  # landmarks.csv가 바뀌었으면 쓰지 않는다
+                wrist.hamer_points(path, frames + 1)
+
+
 class CompositionTest(unittest.TestCase):
     """카메라 기울기(폰 가속도) + 방위 맞춤 + 워치 자세로 손 방향을 워치 축에 되돌린다(session_wrist의 셈을 파일 없이)."""
 

@@ -24,8 +24,13 @@
   ("calibration+zero", zero_rotation). 앱이 확인한 평행 자세를 0으로 두는 것이다. 정면 기준 자세에서 읽힌 젖힘(실데이터 20261031-115740: 17°)은
   카메라 쪽 깊이에서 오고(앱은 그 축을 그림 평면 각으로 보지 못한다), 본편도 같은 정면이라 같은 치우침이 모든 프레임에 들어 있어 빼면 사라진다.
   옆면에서는 손등 쪽 꺾임이 그림 평면에 있어 MediaPipe 깊이에 덜 기대므로, 정면 − 옆면 젖힘을 깊이 치우침 추정으로 보고한다.
-- 쓸 수 있는 프레임(ok): 추적하는 손이 있고, 워치 자이로 표본이 그 시각 ±MAX_GAP_MS 안에 있다. 왼손 세션만 계산한다(오른손은 워치 축이 다르다).
-session_wrist(data, name) → ({"u": (M, 3), "depth": (M, 3), "ok": (M,), "method": str}, 보고 줄) 또는 (None, 보고 줄). M = landmarks.csv 프레임 수.
+- 손 3D: 처리 폴더에 hamer.npz(hamer_keypoints.py — HaMeR 단안 3D 손 복원)가 있고 프레임이 landmarks.csv와 같으면 그 관절을 쓰고("hamer"),
+  아니면 MediaPipe world를 쓴다("mediapipe"). 손목 굽히기를 숫자 5와 견주면 MediaPipe는 10세션 중 5개만 바른 방향이었고 HaMeR는 10개 모두
+  맞혔다(보고서 hand-sonar/2026-10-31-hamer-wrist-check). 두 3D는 같은 축(거울 그림 기준 카메라 축)이다.
+- 쓸 수 있는 프레임(ok): 추적하는 손(HaMeR면 HaMeR 관절도)이 있고, 워치 자이로 표본이 그 시각 ±MAX_GAP_MS 안에 있다. 왼손 세션만 계산한다
+  (오른손은 워치 축이 다르다).
+session_wrist(data, name) → ({"u": (M, 3), "depth": (M, 3), "ok": (M,), "method": str, "source": str}, 보고 줄) 또는 (None, 보고 줄).
+M = landmarks.csv 프레임 수.
 """
 import argparse
 import math
@@ -45,6 +50,7 @@ EDGE_SEC = 0.5  # 동작 시작 뒤 이 안은 맞춤에 쓰지 않는다(pairs.
 NEUTRAL = -3  # prompts.csv 기준 자세 정면(shared Labels.NEUTRAL_ID) — 0점
 NEUTRAL_SIDE = -4  # 기준 자세 옆면(shared Labels.NEUTRAL_SIDE_ID)
 MIN_ZERO = 10  # 0점을 잡을 정면 기준 자세 프레임 하한(2 s 유지면 초당 19프레임에서 약 40)
+HAMER_FILE = "hamer.npz"  # hamer_keypoints.py가 처리 폴더에 쓰는 손 3D
 REF_CLASSES = range(0, 15)  # 기준 자세가 없을 때 방위를 맞출 동작: 손가락 굽히기·ASL 숫자(손목은 그대로 두는 동작)
 PHONE_STILL = 0.1  # 폰 자이로 99% 값(rad/s)이 이보다 크면 폰이 움직인 세션이라 알린다(실데이터 0.005–0.017)
 MIN_REF = 30  # 방위 맞춤에 쓸 프레임 하한
@@ -177,6 +183,17 @@ def class_of_frames(prompts, t_ns, edge_sec=EDGE_SEC):
     return cls, flag, settled
 
 
+def hamer_points(path, frame_ns):
+    """hamer.npz → (3D 관절 (M, 21, 3), 관절이 있는 프레임 (M,)). 파일이 없으면 None, 프레임이 landmarks.csv와 다르면 ValueError."""
+    if not os.path.exists(path):
+        return None
+    with np.load(path, allow_pickle=False) as h:
+        if not np.array_equal(h["frame_ns"], frame_ns):
+            raise ValueError(f"{os.path.basename(path)}의 프레임이 landmarks.csv와 다름 — hamer_keypoints.py --force로 다시")
+        kp = h["keypoints"].astype(np.float64)
+    return kp, np.isfinite(kp).all(axis=(1, 2))
+
+
 def session_wrist(data, name):
     """세션 하나의 손목 정답(머리말). 계산할 수 없으면 (None, 까닭 줄)."""
     folder = hs_io.session_folder(data, name)
@@ -194,6 +211,12 @@ def session_wrist(data, name):
         return None, [f"{name}: 손목 정답 없음(폰 가속도 기록이 없어 카메라 기울기를 모름)"]
     marks = hs_io.read_landmarks(folder)
     prompts = hs_io.read_prompts(folder)
+    notes = []
+    try:
+        hamer = hamer_points(os.path.join(data, "processed", name, HAMER_FILE), marks.frame_ns)
+    except ValueError as e:
+        hamer, notes = None, [f"  {e} — 이번엔 MediaPipe 3D를 쓴다"]
+    points, has, source = (marks.world, marks.tracked, "mediapipe") if hamer is None else (hamer[0], marks.tracked & hamer[1], "hamer")
     rotation = (phone.meta.get("camera") or {}).get("displayRotation")
     accel = np.median(phone_sensors.tracks["acc"].values, axis=0)
     still = float(np.percentile(np.linalg.norm(phone_sensors.tracks["gyro"].values, axis=1), 99)) if "gyro" in phone_sensors.tracks else float("nan")
@@ -206,11 +229,11 @@ def session_wrist(data, name):
     j = np.clip(np.searchsorted(t_gyro, marks.frame_ns), 1, len(t_gyro) - 1)
     j = np.where(np.abs(t_gyro[j - 1] - marks.frame_ns) <= np.abs(t_gyro[j] - marks.frame_ns), j - 1, j)
     near = np.abs(t_gyro[j] - marks.frame_ns) <= MAX_GAP_MS * 1e6
-    ok = marks.tracked & near
+    ok = has & near
     m = len(marks.frame_ns)
     axes = np.full((m, 3, 3), np.nan)
     if ok.any():
-        axes[ok] = hand_axes(joints.to_left(marks.world[ok], "left"))
+        axes[ok] = hand_axes(joints.to_left(points[ok], "left"))
     rot_f = rot[j]
     up_k = up_camera(accel, rotation or 0)
     c0 = rotation_to_z(up_k)
@@ -239,9 +262,9 @@ def session_wrist(data, name):
     idx = np.flatnonzero(ref)
     thirds = [math.degrees(fit_yaw(*yaw_pairs(c0, axes[s], rot_f[s], method))) for s in np.array_split(idx, 3) if len(s)]
     ext, dev = extension_deviation(u)
-    lines = [f"{name}: 손목 정답 {int(ok.sum())}/{m}프레임, 방위 맞춤 {method}({int(ref.sum())}프레임) {math.degrees(psi):.1f}°"
+    lines = [f"{name}: 손목 정답 {int(ok.sum())}/{m}프레임(손 3D {source}), 방위 맞춤 {method}({int(ref.sum())}프레임) {math.degrees(psi):.1f}°"
              f"(1/3씩 {', '.join(f'{v:.1f}' for v in thirds)}), 폰 뒤로 기욺 {math.degrees(math.acos(min(1.0, -up_k[1]))):.1f}°"
-             f"·자이로 99% {still:.3f} rad/s, 워치 자이로 치우침 {np.round(bias, 4).tolist()} rad/s"]
+             f"·자이로 99% {still:.3f} rad/s, 워치 자이로 치우침 {np.round(bias, 4).tolist()} rad/s"] + notes
     if still > PHONE_STILL:
         lines.append(f"  폰이 움직였다(자이로 99% {still:.3f} > {PHONE_STILL} rad/s) — 카메라 기울기를 상수로 본 가정이 틀릴 수 있다")
     for sel, label in ((side, "옆면"), (front, "정면")):
@@ -260,7 +283,7 @@ def session_wrist(data, name):
         if sel.sum() >= 10:
             lines.append(f"  {label}: 젖힘 {np.median(ext[sel]):.1f}° [{np.percentile(ext[sel], 10):.1f}, {np.percentile(ext[sel], 90):.1f}]"
                          f" · 꺾임 {np.median(dev[sel]):.1f}° [{np.percentile(dev[sel], 10):.1f}, {np.percentile(dev[sel], 90):.1f}]")
-    return {"u": u.astype(np.float32), "depth": depth.astype(np.float32), "ok": ok, "method": method}, lines
+    return {"u": u.astype(np.float32), "depth": depth.astype(np.float32), "ok": ok, "method": method, "source": source}, lines
 
 
 def main():

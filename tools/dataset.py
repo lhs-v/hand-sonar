@@ -37,7 +37,8 @@
 dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), wrist·wrist_depth (N, 3) float32와 wrist_ok (N,) bool
-(손목 정답, 위), wrist_method (S,) 문자열("calibration+zero" | "calibration" | "ulnar" | ""), sessions·hands (S,) 문자열,
+(손목 정답, 위), wrist_method (S,) 문자열("calibration+zero" | "calibration" | "ulnar" | ""), wrist_source (S,) 문자열(손 3D: "hamer" |
+"mediapipe" | ""), sessions·hands (S,) 문자열,
 length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wear (S,) int64(착용 번호, wear_episodes — 옛 dataset.npz에는 없고 그때는
 rewear로 만든다), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
 label_names (K,) 문자열, input_files (3,) 문자열(verify_sync.INPUTS)과 inputs (S, 3) 문자열(그 세션 sync.json의 입력 SHA-256 지문).
@@ -232,13 +233,14 @@ def session_data(data, name, bins=BINS, standardized=True):
         w, wrist_lines = None, [f"{name}: 손목 정답 계산 오류({type(e).__name__}: {e})"]
     lines += ["  " + line for line in wrist_lines]
     if w is None:
-        w = {"u": np.zeros((len(use), 3), np.float32), "depth": np.zeros((len(use), 3), np.float32), "ok": np.zeros(len(use), bool), "method": ""}
+        w = {"u": np.zeros((len(use), 3), np.float32), "depth": np.zeros((len(use), 3), np.float32), "ok": np.zeros(len(use), bool), "method": "",
+             "source": ""}
     length_mm = float(np.median(length[good])) * 1000.0
     lines.append(f"  L(손목–새끼 MCP 중앙값) {length_mm:.1f} mm, 엄지가 손바닥 쪽인 프레임 {palmar:.1%}, 라벨 붙은 프레임 {int((use & labelled).sum())}개")
     part = {"x": windows(raw, diff, p["row"][use], bins=bins, standardized=standardized), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
             "row": p["row"][use], "prompt": p["prompt"][use].astype(np.int32), "class_id": p["classId"][use].astype(np.int16),
             "flag": p["flag"][use], "edge": p["edge"][use] == 1, "labelled": labelled[use], "v9": v9.astype(np.float32),
-            "wrist": w["u"][use], "wrist_depth": w["depth"][use], "wrist_ok": w["ok"][use], "wrist_method": w["method"],
+            "wrist": w["u"][use], "wrist_depth": w["depth"][use], "wrist_ok": w["ok"][use], "wrist_method": w["method"], "wrist_source": w["source"],
             "name": name, "hand": hand, "length_mm": length_mm, "rewear": bool(phone.meta.get("rewear")),
             "wall_ms": hs_io.num(phone.meta.get("start"), "wallMs", np.nan),
             "inputs": [str((sync.get("inputs") or {}).get(f, "")) for f in verify_sync.INPUTS],
@@ -254,6 +256,7 @@ def merge(parts):
     ds["sessions"] = np.array([p["name"] for p in parts])
     ds["hands"] = np.array([p["hand"] for p in parts])
     ds["wrist_method"] = np.array([p["wrist_method"] for p in parts])
+    ds["wrist_source"] = np.array([p["wrist_source"] for p in parts])
     ds["length_mm"] = np.array([p["length_mm"] for p in parts], dtype=np.float64)
     ds["rewear"] = np.array([p["rewear"] for p in parts], dtype=bool)
     ds["wall_ms"] = np.array([p["wall_ms"] for p in parts], dtype=np.float64)

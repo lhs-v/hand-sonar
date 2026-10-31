@@ -247,6 +247,11 @@
   - 첫 세션(20261031-115740, 정면 하나만 잡던 판): 앱은 손 6°·팔뚝 5°로 통과했지만 PC는 17° 젖힘으로 읽었다. 그 차이는 깊이 방향이다. 실제 젖힘인지 MediaPipe 깊이 오차인지 카메라 한 대로는 가를 수 없어 옆면 차례를 더했다.
   - 같은 세션에서 기준 자세로 맞춘 방위(146.0°)와 옛 세션 방식(새끼 쪽 축, 1/3씩 147–150°)이 1–4° 안에서 같았다.
 - **주먹 쥘 때 손목 젖힘** [판단 못 함]: 손가락을 많이 접는 동작(숫자 0·1)과 편 손(숫자 4·5)의 젖힘 차는 MediaPipe 3D로 10세션 중앙 −0.6°(양수 4/10)다.
+- **HaMeR로 손 3D 교체** [확인: 10세션, 2026-10-31]
+  - 손목 굽히기(카메라 쪽 깊이)를 숫자 5와 견주면 MediaPipe는 중앙 +1.0°(바른 방향 5/10)였다. HaMeR(arXiv 2312.05251, 다시점 3D로 학습한 단안 손 복원)는 −12.9°(10/10)였다.
+  - 젖히기는 둘 다 약 +7°(평소 자세가 이미 젖혀져 있어 여지가 작다), 새끼 쪽 꺾기(그림 평면)는 둘 다 +38°(10/10)다.
+  - `tools/hamer_keypoints.py`가 세션마다 `hamer.npz`를 만들고 `wrist.py`가 그것을 쓴다(없으면 MediaPipe). 세션당 약 40초(RTX 5070).
+  - 기준 자세 정면(20261031-115740)은 HaMeR도 24° 젖힘으로 읽었다(MediaPipe 17°). 손이 실제로 젖혀진 채 통과했을 가능성이 커서, 옆면 차례가 필요하다는 근거가 된다.
 - **MediaPipe 크기·손바닥 모양** [확인: 11세션, 접은 손 ÷ 편 손]
   - 손 전체 크기(손목–새끼 MCP)가 0.965배로 줄었다(11/11).
   - 손바닥은 길이 0.973배·폭 1.018배라 길이÷폭이 0.954배다(3D, 손이 어느 쪽을 보든 같아야 하는 값).
@@ -291,6 +296,10 @@ python -I tools/train.py --data ../hand-sonar-unpacked --mode blocks --run block
 python -I tools/train.py --data ../hand-sonar-unpacked --mode session --run session-9
 
 # 손목 상태: 세션마다 손목 정답 보고, 다중 과제로 학습(센서 기록이 있는 원본 세션 폴더가 필요 — 데이터 묶음에는 센서가 없다)
+# 손 3D를 HaMeR로(권장): 처음 한 번 HaMeR를 ../hamer에 받고 --setup, 그다음 세션마다 hamer.npz를 만든다(영상이 있는 PC)
+git clone https://github.com/geopavlakos/hamer ../hamer
+python -I tools/hamer_keypoints.py --setup --mano <MANO_RIGHT.pkl>
+python -I tools/hamer_keypoints.py
 python -I tools/wrist.py
 python -I tools/train.py --mode blocks --run blocks-wrist --wrist 0.1
 

@@ -733,7 +733,8 @@ def main():
     print("\n".join(mix_lines(mix)))
     if args.wrist > 0:
         has = {name: int(ds["wrist_ok"][idx].sum()) for name, idx in zip(dataset.ROLES, parts)}
-        methods = ", ".join(f"{n} {w or '없음'}" for n, w in zip(ds["sessions"], ds["wrist_method"]))
+        sources = ds.get("wrist_source", np.full(len(ds["sessions"]), ""))
+        methods = ", ".join(f"{n} {w or '없음'}{'·' + s if s else ''}" for n, w, s in zip(ds["sessions"], ds["wrist_method"], sources))
         print(f"손목 정답이 있는 프레임: 학습 {has['train']} · 검증 {has['val']} · 시험 {has['test']}(세션별 방위 맞춤: {methods})")
         if has["train"] == 0:
             print("학습 프레임에 손목 정답이 없어 --wrist를 쓸 수 없음(워치·폰 센서 기록이 있는 세션이 필요)")
