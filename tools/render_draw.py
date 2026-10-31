@@ -225,15 +225,16 @@ def panel_points(mm, panel, h0, view):
     return np.stack([to_panel(a, b, panel, h0) for a, b in zip(hh, vv)]) - np.array((panel[0] + 1, panel[1] + 1))
 
 
-def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False):
-    """영상 내내 같은 배경(제목·범례·패널 틀·격자·평균 자세·설명·띠 바탕)을 한 번 그린다. RGB numpy. mano면 3D 뼈대 대신 메시 패널 둘."""
+def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False, gt_name="MediaPipe"):
+    """영상 내내 같은 배경(제목·범례·패널 틀·격자·평균 자세·설명·띠 바탕)을 한 번 그린다. RGB numpy. mano면 3D 뼈대 대신 메시 패널 둘.
+    gt_name은 범례·메시 제목에 적을 정답 3D 이름(dataset.GT_NAMES)."""
     if mano:
         mean_mm = None  # 메시 판에는 3D 뼈대 패널이 없다
     img = Image.new("RGB", (CW, CH), rgb(SURFACE))
     d = ImageDraw.Draw(img)
     text(d, (16, 24), title, 22, INK, bold=True)
     text(d, (16, 50), subtitle, 13, INK2)
-    entries = (("MediaPipe 정답", "gt"), ("FastViT 예측", "pred")) + ((("학습 평균 자세", "mean"),) if mean_mm is not None else ())
+    entries = ((f"{gt_name} 정답", "gt"), ("FastViT 예측", "pred")) + ((("학습 평균 자세", "mean"),) if mean_mm is not None else ())
     widths = [tlen(d, label, 13) + 28 + 10 for label, _ in entries]
     lx = CW - 16 - sum(widths) - 20 * (len(entries) - 1)
     for (label, kind), wd in zip(entries, widths):
@@ -246,7 +247,7 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, ma
         lx += wd + 20
     text(d, (PA[0], 72), "손 영상 위 겹쳐 보기(근사)" if video else "화면 좌표 뼈대(영상 없음, 근사)", 14, INK, bold=True)
     if mano:
-        text(d, (PB_M[0], 72), "정답 MANO — MediaPipe 관절에 맞춤", 14, INK, bold=True)
+        text(d, (PB_M[0], 72), f"정답 MANO — {gt_name} 관절에 맞춤", 14, INK, bold=True)
         text(d, (PC_M[0], 72), "예측 MANO — FastViT 관절에 맞춤", 14, INK, bold=True)
         for x0, y0, w, h in (PB_M, PC_M):
             d.rectangle([x0, y0, x0 + w, y0 + h], fill=(255, 255, 255), outline=rgb(BASE))
@@ -359,7 +360,7 @@ def draw_timeline(canvas, tl, ymax):
 
 def mesh_image(S, n, verts_mm):
     """손바닥 틀 메시 (V, 3) mm → (영상 픽셀 (V, 2), 깊이 (V,) 영상 px 단위). 손 방향·위치·크기는 그 프레임 정답으로 되돌리고(pred_world와 같은 식),
-    world → 영상은 정답 21점의 닮음 맞춤을 그대로 쓴다. 깊이는 MediaPipe world z(클수록 카메라에서 멂)."""
+    world → 영상은 정답 21점의 닮음 맞춤을 그대로 쓴다. 깊이는 정답 world z(클수록 카메라에서 멂)."""
     unit = verts_mm / S["L_mm"]
     w = joints.to_left((S["rot"][n].T @ (unit * S["Lm"][n]).T).T + S["real"][n, 0], S["hand"])
     A, sm, dm = fit_similarity(S["world"][n][:, :2], S["img_px"][n])

@@ -140,6 +140,9 @@ handsonar.keyPassword=android
      - 설치(처음 한 번, 저장소 밖 `../hamer`): `git clone https://github.com/geopavlakos/hamer ../hamer`, 그다음 `python -I tools/hamer_keypoints.py --setup --mano <MANO_RIGHT.pkl>`. 모델 묶음 6.04 GB를 받으면서 체크포인트 2.69 GB와 설정만 꺼내고, MANO 오른손을 chumpy 없는 파일로 바꿔 둡니다.
      - 추가 패키지: `smplx==0.1.28`, `yacs`, `einops`, `pytorch-lightning`, `webdataset`. 렌더러는 쓰지 않습니다.
      - 실행: `python -I tools/hamer_keypoints.py [세션 …]`(GPU, 세션당 약 40초). 영상에 얼굴이 찍혀 있어 PC 안에서만 돌립니다.
+   - 손가락 정답 `--gt hamer`: 손가락 목표도 HaMeR 3D로 만듭니다(`hamer.npz`가 있는 세션만, 프레임 거르기와 L은 MediaPipe 그대로). 기본 `mediapipe`는 논문과 같은 정답이라 논문 수치(MPJPE 7.87 mm)와 직접 견줄 수 있습니다.
+     - 11세션에서 견주면 HaMeR가 어느 손가락이 굽었는지는 조금 더 잘 가르고(AUC 0.946–0.963 대 0.929–0.960), 굽힘 크기는 1.4–1.8배 크게 읽었습니다. 손가락도 카메라 쪽으로 굽어, MediaPipe가 깊이를 눌러 읽는 것과 맞습니다.
+     - 두 정답은 같은 프레임에서 관절당 중앙 13.6 mm 다릅니다. 실행 이름(`--run`이 없을 때)과 `metrics.json` `gt`에 남고, `render_video.py`는 그 실행의 정답으로 그립니다.
 8. `python -I tools/render_video.py <학습 결과 폴더> --out <저장소 밖 폴더> [--session 세션] [--frames test|all] [--seg]` — 학습한 모델의 결과를 영상으로 봅니다.
    - 한 화면: 손 영상 위 겹쳐 보기(정답 = 흰 선, 예측 = 파란 띠), 손바닥 틀 3D 두 시점(정답·예측·학습 평균 자세), 동작·MPJPE·역할 꼬리표, 오차 시간 띠(모델과 평균 자세 상수, 커서 = 지금 프레임).
    - 나누기는 그 실행의 `metrics.json`대로 다시 만들고, 기본(`--frames test`)은 시험 프레임만 그립니다(블록 나누기는 시험 블록마다 제목 카드). 예측은 그 세션의 창을 다시 만들어 `model.pt`로 냅니다.

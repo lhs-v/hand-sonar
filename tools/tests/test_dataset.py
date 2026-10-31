@@ -177,6 +177,41 @@ class SessionFolderTest(unittest.TestCase):
             os.makedirs(os.path.join(data, "phone", "sessions", "E"))  # meta.json 없음
             self.assertEqual([500.0, 1_200.0], sorted(dataset.rewear_marks(data)))
 
+    def test_hamer_ground_truth_replaces_only_the_finger_targets(self):
+        drop = 200  # MediaPipe 거르기는 지나지만 HaMeR 관절이 없는 프레임
+        with tempfile.TemporaryDirectory() as data:
+            write_session(data)
+            path = os.path.join(data, "processed", NAME, "hamer.npz")
+            ns = T0 + np.arange(FRAMES) * SEC // 30
+            kp = np.stack([real_hand(FRAMES - 1 - n) * joints.MIRROR for n in range(FRAMES)])  # 검지 굽힘이 거꾸로 — MediaPipe와 다른 손
+            kp[list(NO_HAND) + [drop]] = np.nan
+            np.savez(path, frame_ns=ns, keypoints=kp.astype(np.float32))
+            mp, _ = dataset.build(data)
+            hm, lines = dataset.build(data, gt="hamer")
+            self.assertIsNotNone(hm, "\n".join(lines))
+            frame = np.rint((mp["frame_ns"] - T0) * 30 / SEC).astype(int)
+            self.assertIn(drop, frame)
+            np.testing.assert_array_equal(mp["frame_ns"][frame != drop], hm["frame_ns"])  # 거르기는 MediaPipe 그대로, HaMeR 관절 없는 프레임만 더 빠진다
+            kept = frame[frame != drop]
+            targets = np.stack([joints.targets(kp[n][None].astype(np.float64), "left")[0][0] for n in kept])
+            np.testing.assert_allclose(hm["y"].reshape(-1, 20, 3), targets, atol=1e-5)
+            self.assertGreater(float(np.abs(hm["y"] - mp["y"][frame != drop]).max()), 0.1)  # MediaPipe 목표와는 다르다
+            np.testing.assert_array_equal(mp["length_mm"], hm["length_mm"])  # L(mm)은 둘 다 MediaPipe
+            self.assertEqual(("mediapipe", "hamer"), (str(mp["gt"]), str(hm["gt"])))
+            self.assertTrue(any("정답 HaMeR" in line for line in lines) and any("HaMeR 관절 없음" in line for line in lines), "\n".join(lines))
+            dataset.save(os.path.join(data, "dataset.npz"), hm)
+            self.assertEqual("hamer", str(dataset.load(os.path.join(data, "dataset.npz"))["gt"]))
+            np.savez(path, frame_ns=ns + 1, keypoints=kp.astype(np.float32))  # 프레임이 landmarks.csv와 다르면 섞지 않고 건너뛴다
+            ds, lines = dataset.build(data, gt="hamer")
+            self.assertIsNone(ds)
+            self.assertTrue(any("landmarks.csv와 다름" in line for line in lines), "\n".join(lines))
+            os.remove(path)
+            ds, lines = dataset.build(data, gt="hamer")
+            self.assertIsNone(ds)
+            self.assertTrue(any("hamer.npz" in line and "hamer_keypoints.py" in line for line in lines), "\n".join(lines))
+            with self.assertRaises(ValueError):
+                dataset.session_data(data, NAME, gt="openpose")
+
     def test_pairs_made_with_an_old_lag_are_skipped(self):
         with tempfile.TemporaryDirectory() as data:
             write_session(data)

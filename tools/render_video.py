@@ -1,4 +1,4 @@
-"""학습한 모델의 결과를 영상으로 본다(손 소나): 세션 하나의 프레임마다 MediaPipe 정답 손 뼈대와 FastViT 예측을 함께 그린다.
+"""학습한 모델의 결과를 영상으로 본다(손 소나): 세션 하나의 프레임마다 정답 손 뼈대와 FastViT 예측을 함께 그린다.
 
     python -I tools/render_video.py <학습 결과 폴더> --out <출력 폴더> [--data 데이터 폴더] [--session 세션] [--frames test|all]
                                     [--video 영상 파일 | --no-video] [--seg] [--mano MANO_LEFT.pkl] [--check N] [--limit N] [--fps F]
@@ -6,7 +6,8 @@
 
 - 학습 결과 폴더: train.py가 쓴 model.pt·dataset.npz·metrics.json. 나누기는 metrics.json의 mode·split(블록 offset, 세션 이름)으로
   train.split_frames를 다시 불러 만들고, 프레임 수가 metrics.json frames와 다르면 멈춘다. 예측은 그 세션의 창을 지금 처리 폴더에서 다시 만들어
-  (dataset.session_data) model.pt로 낸다. 다시 만든 프레임·목표가 dataset.npz와 다르면(학습 뒤 처리를 다시 돌림) 멈춘다.
+  (dataset.session_data) model.pt로 낸다. 다시 만든 프레임·목표가 dataset.npz와 다르면(학습 뒤 처리를 다시 돌림) 멈춘다. 정답은 그 실행의 것이다
+  (dataset.npz gt — train.py --gt. hamer면 3D 패널·손 틀이 처리 폴더 hamer.npz를 쓰고, 영상 위 흰 뼈대는 늘 MediaPipe 화면 좌표다).
 - --session: 없으면 시험 프레임이 가장 많은 세션.
 - --frames test(기본): 그 실행의 시험 프레임. blocks는 시험 블록마다(블록 앞에 제목 카드. 블록 첫 2 s의 비운 프레임은 정답만),
   session·time은 그 세션의 첫 시험 프레임부터 마지막까지, overfit은 세션 전체. all: 세션 전체(꼬리표가 학습·검증·시험 역할을 알린다).
@@ -39,6 +40,7 @@ import hand_seg  # noqa: E402
 import joints  # noqa: E402
 import pairs  # noqa: E402
 import render_draw as D  # noqa: E402
+import wrist  # noqa: E402
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -50,7 +52,7 @@ LOG_EVERY = 500
 ROLE_TAGS = (("학습 프레임", D.GREEN), ("검증 프레임(멈춤 판단에만 씀)", D.ORANGE), ("시험 프레임(학습에 안 씀)", D.PURPLE))
 TITLES = {"blocks": "처음 보는 10 s 덩어리 — 블록 나누기의 시험 블록", "session": "처음 보는 세션 — 세션 나누기의 시험 세션",
           "time": "세션 끝 15% — 시간 나누기의 시험 구간", "overfit": "과적합 점검 — 학습한 프레임 그대로"}
-NOTE_VIDEO = ("파란 뼈대는 근사입니다. 손 방향·크기·위치는 정답(MediaPipe)을 그대로 쓰고 손가락 모양만 예측으로 바꿨습니다. "
+NOTE_VIDEO = ("파란 뼈대는 근사입니다. 손 방향·크기·위치는 정답({gt})을 그대로 쓰고 손가락 모양만 예측으로 바꿨습니다. "
               "예측과 정답의 차이를 닮음 변환으로 영상 픽셀에 옮겼습니다.")
 NOTE_NO_VIDEO = ("영상 없이 MediaPipe 화면 좌표로 그린 뼈대입니다. 파란 뼈대는 근사입니다: 손 방향·크기·위치는 정답 그대로이고 "
                  "손가락 모양만 예측입니다.")
@@ -96,12 +98,17 @@ def pick_session(saved, test, name=None):
     return names.index(name), counts
 
 
+def run_gt(saved):
+    """그 실행 dataset.npz의 손가락 정답 3D(dataset.GT_SOURCES). 이 칸이 없는 옛 실행은 mediapipe다."""
+    return str(saved["gt"]) if "gt" in saved else "mediapipe"
+
+
 def predict_session(data, run, saved, k):
     """(세션 k 학습 자료 프레임의 예측 (M, 20, 3), 목표 (M, 20, 3), 장치). 창은 지금 처리 폴더에서 다시 만든다."""
     import torch
     import train
     name = str(saved["sessions"][k])
-    part, lines = dataset.session_data(data, name)
+    part, lines = dataset.session_data(data, name, gt=run_gt(saved))
     if part is None:
         raise ValueError(f"{name}: 학습 자료를 다시 만들지 못함 — " + " / ".join(lines))
     mine = saved["session"] == k
@@ -152,10 +159,14 @@ def prepare(data, run, m, saved, parts, k, frames, size):
     hand = hs_io.read_session(folder).hand
     n = len(marks.frame_ns)
     S = {"name": name, "hand": hand, "n": n, "frame_ns": marks.frame_ns, "world": marks.world, "tracked": marks.tracked, "valid": marks.valid,
-         "score": marks.score, "img_px": marks.image[:, :, :2] * np.asarray(size, dtype=np.float64), "L_mm": float(saved["length_mm"][k])}
+         "score": marks.score, "img_px": marks.image[:, :, :2] * np.asarray(size, dtype=np.float64), "L_mm": float(saved["length_mm"][k]),
+         "gt": run_gt(saved)}
     S["good"], _ = joints.keep_frames(marks.world, marks.score, marks.valid)
+    if S["gt"] == "hamer":  # 정답 뼈대와 예측을 놓을 손 틀도 그 실행의 정답 3D로(거르기는 dataset처럼 MediaPipe로 하고 HaMeR 관절이 없는 프레임을 더 뺀다)
+        S["world"], has = wrist.hamer_points(os.path.join(data, "processed", name, wrist.HAMER_FILE), marks.frame_ns)
+        S["good"] &= has
     with np.errstate(invalid="ignore", divide="ignore"):  # 손이 없는 줄(nan → 0)은 nan이 된다
-        real = joints.to_left(np.nan_to_num(marks.world, nan=0.0), hand)
+        real = joints.to_left(np.nan_to_num(S["world"], nan=0.0), hand)
         coords, rot = joints.palm_frame(real)
         unit, Lm = joints.unit_hand(coords)
     S.update(real=real, rot=rot, unit=unit, Lm=Lm)
@@ -384,10 +395,11 @@ def main():
     print(f"{run_name}: {mode} 나누기, 세션 {name}(시험 프레임 {int(counts[k])}개), {args.frames}, 구간 {len(segs)}개, 예측 장치 {device}")
     print(f"  {how}")
     title = "세션 전체 — 학습·검증·시험 프레임 모두" if args.frames == "all" else TITLES[mode]
-    subtitle = (f"FastViT-T12 · 실행 {run_name} · 세션 {name}({'왼손' if S['hand'] == 'left' else '오른손'}) · 정답 = MediaPipe 손 관절"
+    gt_name = dataset.GT_NAMES[S["gt"]]
+    subtitle = (f"FastViT-T12 · 실행 {run_name} · 세션 {name}({'왼손' if S['hand'] == 'left' else '오른손'}) · 정답 = {gt_name} 손 관절"
                 " · 시간은 학습 자료 첫 프레임부터")
-    bg = D.static_background(title, subtitle, (NOTE_VIDEO if video else NOTE_NO_VIDEO, NOTE_MANO if args.mano else note_3d(S["L_mm"])), S["ymax"],
-                             video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano))
+    bg = D.static_background(title, subtitle, (NOTE_VIDEO.format(gt=gt_name) if video else NOTE_NO_VIDEO, NOTE_MANO if args.mano else note_3d(S["L_mm"])),
+                             S["ymax"], video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano), gt_name=gt_name)
     order = [(i, int(f)) for i, s in enumerate(segs) for f in s["frames"]]
     if args.limit:
         order = order[: args.limit]

@@ -20,6 +20,11 @@
   아니라 라벨에서 뺀다(프레임은 학습에 그대로 쓴다).
 - 손목 정답(wrist.session_wrist, 2026-10-30): 프레임마다 워치 축으로 적은 손 방향 u와 카메라 깊이 축 d. 워치·폰 센서 기록이 없는 세션
   (이 기능 전·공개 데이터)은 wrist_ok가 모두 거짓이고 u·d는 0이다. 학습은 train.py --wrist일 때만 쓴다.
+- 손가락 정답의 3D(gt, 2026-10-31): "mediapipe"(기본, 논문과 같은 MediaPipe world) 또는 "hamer"(처리 폴더 hamer.npz — hamer_keypoints.py,
+  HaMeR 단안 3D 손 복원). 거르기(점수·손목 튐·길이 ±3σ)와 L은 둘 다 MediaPipe로 해 같은 프레임 규칙·같은 손 크기(mm)를 쓰고, hamer면 HaMeR
+  관절이 없는 프레임도 뺀다. hamer.npz가 없거나 프레임이 landmarks.csv와 다른 세션은 건너뛴다(한 자료에 두 정답을 섞지 않는다). 11세션에서
+  견주면 HaMeR가 손가락 구분은 조금 낫고 굽힘 크기를 1.4–1.8배 크게 읽었다(MediaPipe는 카메라 쪽 깊이를 눌러 읽음 — 보고서
+  hand-sonar/2026-10-31-hamer-wrist-check). 손목 정답은 gt와 상관없이 wrist.session_wrist가 고른 3D를 쓴다.
 - 나누기(설계 §4). 셋 다 (학습, 검증, 시험) 프레임 번호를 세션·시각 순서로 낸다.
   - session_split(세션 단위): 착용 묶음 통째로 나눈다(계획 6 검토 고침 M1). 착용(wear_episodes): 시각(meta start wallMs) 순으로 meta.json
     rewear가 참인 세션에서 새 착용이 시작해 다음 그런 세션 전까지 간다. 경계에는 자료에 들지 않은 세션(휴지통·끝나지 않음·처리 안 됨)의
@@ -38,7 +43,7 @@ dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), wrist·wrist_depth (N, 3) float32와 wrist_ok (N,) bool
 (손목 정답, 위), wrist_method (S,) 문자열("calibration+zero" | "calibration" | "ulnar" | ""), wrist_source (S,) 문자열(손 3D: "hamer" |
-"mediapipe" | ""), sessions·hands (S,) 문자열,
+"mediapipe" | ""), gt () 문자열(손가락 정답의 3D, 위 — 이 칸이 없는 옛 dataset.npz는 "mediapipe"), sessions·hands (S,) 문자열,
 length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wear (S,) int64(착용 번호, wear_episodes — 옛 dataset.npz에는 없고 그때는
 rewear로 만든다), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
 label_names (K,) 문자열, input_files (3,) 문자열(verify_sync.INPUTS)과 inputs (S, 3) 문자열(그 세션 sync.json의 입력 SHA-256 지문).
@@ -73,6 +78,8 @@ BLOCK_PERIOD = 20  # 블록 번호 mod 20(+offset)으로 역할을 정한다: �
 BLOCK_TEST = (0, 7, 14)  # 시험 자리: 20블록 안에 고르게 흩어짐(7·7·6칸 간격). 이 세션(22블록)에서는 자리 0이 두 번(블록 0·20) 나와 시험 4블록
 BLOCK_VAL = (3, 10, 17)  # 검증 자리: 시험 사이사이(3·4·3·4·3·3칸 간격으로 시험·검증이 번갈아 놓임)
 ROLES = ("train", "val", "test")  # block_assign의 역할 번호 0·1·2
+GT_NAMES = {"mediapipe": "MediaPipe", "hamer": "HaMeR"}  # 손가락 정답의 3D(session_data gt) → 보일 이름
+GT_SOURCES = tuple(GT_NAMES)
 
 
 def kind_of(class_id, labelled):
@@ -184,8 +191,10 @@ def windows(raw, diff, rows, block=512, bins=BINS, standardized=True):
     return out
 
 
-def session_data(data, name, bins=BINS, standardized=True):
-    """세션 하나: (학습 자료 dict 또는 None, 보고 줄). bins·standardized는 창 x를 만드는 방식(windows)."""
+def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe"):
+    """세션 하나: (학습 자료 dict 또는 None, 보고 줄). bins·standardized는 창 x를 만드는 방식(windows), gt는 손가락 정답의 3D(GT_SOURCES)."""
+    if gt not in GT_SOURCES:
+        raise ValueError(f"정답 {gt!r}은 {'·'.join(GT_SOURCES)} 중 하나여야 함")
     out = os.path.join(data, "processed", name)
     folder = hs_io.session_folder(data, name)
     p = read_pairs(os.path.join(out, "pairs.csv"))
@@ -210,18 +219,29 @@ def session_data(data, name, bins=BINS, standardized=True):
     paired = (p["hand"] == 1) & (p["direct"] == 1)
     windowed = window_ok(ok, p["row"])
     use = paired & windowed & good
+    points, no_hamer = marks.world, ""
+    if gt == "hamer":
+        try:
+            got = wrist.hamer_points(os.path.join(out, wrist.HAMER_FILE), marks.frame_ns)
+        except ValueError as e:
+            return None, [f"{name}: 건너뜀(정답 HaMeR — {e})"]
+        if got is None:
+            return None, [f"{name}: 건너뜀(정답 HaMeR인데 처리 폴더에 {wrist.HAMER_FILE}이 없음 — hamer_keypoints.py를 먼저)"]
+        points, has = got
+        no_hamer = f", HaMeR 관절 없음 {int((~has).sum())}"
+        use &= has
     scored = np.nan_to_num(marks.score, nan=-1.0) >= joints.MIN_SCORE
-    lines = [f"{name}({hand}): 프레임 {len(use)}개 중 {int(use.sum())}개 씀",
+    lines = [f"{name}({hand}{', 정답 HaMeR' if gt == 'hamer' else ''}): 프레임 {len(use)}개 중 {int(use.sum())}개 씀",
              f"  뺀 것(겹침 있음): 짝 줄 못 씀(손·직접 경로) {int((~paired).sum())}, 창 안 ok 아닌 줄·앞 줄 모자람 {int((~windowed).sum())},"
              f" 정답 거르기 {int((~good).sum())}(손 없음·점수 {joints.MIN_SCORE} 아래 {int((~scored).sum())},"
              f" 손이 둘인 줄 손목 튐 {int((scored & ~marks.valid).sum())},"
-             f" 손목–새끼 MCP ±{joints.MAD_LIMIT:g}σ 밖 {int((base & ~good).sum())})"] + filter_lines(p["classId"], base, good, length)
+             f" 손목–새끼 MCP ±{joints.MAD_LIMIT:g}σ 밖 {int((base & ~good).sum())}){no_hamer}"] + filter_lines(p["classId"], base, good, length)
     if (p["video"] < 0).any():  # 거르지 않고 알리기만 한다(머리말)
         lines.append(f"  영상 n = 줄 n 아님(pairs.csv video 칸 빔 {int((p['video'] < 0).sum())}줄 — meta video·프레임 수를 볼 것):"
                      " 정답은 영상 없이 frameNs로 맞추므로 그대로 쓴다")
     if not use.any():
         return None, lines
-    y, v9, palmar = joints.targets(marks.world[use], hand)
+    y, v9, palmar = joints.targets(points[use], hand)
     if palmar < MIN_PALMAR:
         return None, lines + [f"  건너뜀: 거울을 되돌린 손에서 엄지가 손바닥 쪽인 프레임 {palmar:.1%}(문턱 {MIN_PALMAR:.0%}. 실제 손 모양이 아니거나"
                               " 반쯤 거울 — 거울·손 처리를 볼 것)"]
@@ -271,8 +291,9 @@ def merge(parts):
     return ds
 
 
-def build(data, names=(), bins=BINS, standardized=True):
-    """(학습 자료 dict 또는 None, 보고 줄). 세션 이름이 없으면 쓸 수 있는 세션 모두. bins·standardized는 창 x를 만드는 방식(windows)."""
+def build(data, names=(), bins=BINS, standardized=True, gt="mediapipe"):
+    """(학습 자료 dict 또는 None, 보고 줄). 세션 이름이 없으면 쓸 수 있는 세션 모두. bins·standardized는 창 x를 만드는 방식(windows),
+    gt는 손가락 정답의 3D(GT_SOURCES)."""
     parts, lines = [], []
     for name, why in hs_io.chosen(data, names):
         if not why:
@@ -281,7 +302,7 @@ def build(data, names=(), bins=BINS, standardized=True):
             lines.append(f"{name}: 건너뜀({why})")
             continue
         try:
-            part, more = session_data(data, name, bins, standardized)
+            part, more = session_data(data, name, bins, standardized, gt)
         except Exception as e:  # noqa: BLE001  한 세션이 넘어져도 다른 세션은 쓴다
             part, more = None, [f"{name}: 처리 중 오류로 건너뜀({type(e).__name__}: {e})"]
         lines += more
@@ -291,6 +312,7 @@ def build(data, names=(), bins=BINS, standardized=True):
         return None, lines
     ds = merge(parts)
     ds["wear"] = wear_episodes(ds["wall_ms"], ds["rewear"], rewear_marks(data))
+    ds["gt"] = np.array(gt)
     return ds, lines
 
 
@@ -448,8 +470,9 @@ def main():
     parser.add_argument("--data", default=hs_io.DEFAULT_DATA)
     parser.add_argument("--out", help="dataset.npz 경로(없으면 보고만 하고 쓰지 않음)")
     parser.add_argument("--save-x", action="store_true", help="창 x도 dataset.npz에 쓴다(세션당 약 170 MB)")
+    parser.add_argument("--gt", choices=GT_SOURCES, default="mediapipe", help="손가락 정답의 3D(hamer는 처리 폴더 hamer.npz가 있는 세션만)")
     args = parser.parse_args()
-    ds, lines = build(args.data, args.sessions)
+    ds, lines = build(args.data, args.sessions, gt=args.gt)
     print("\n".join(lines))
     if ds is None:
         print("쓸 세션이 없음")
