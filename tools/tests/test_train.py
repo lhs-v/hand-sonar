@@ -62,6 +62,12 @@ class WristTest(unittest.TestCase):
         self.assertEqual(0.0, float(train.loss_fn(pred, true, pair)))  # 손가락 60값만 본다
         self.assertAlmostEqual(0.5, float(train.loss_fn(pred, true, pair, wrist_weight=0.5)), places=6)  # 그림 평면 오차 1 × 무게 0.5
 
+    def test_model_takes_more_input_channels(self):
+        model = train.make_model(train.FINGER_OUT, in_chans=4).eval()
+        with torch.no_grad():
+            out = model(torch.zeros(2, 4, 96, 60))
+        self.assertEqual((2, train.FINGER_OUT), tuple(out.shape))
+
     def test_model_outputs_follow_the_head_size(self):
         model = train.make_model(train.FINGER_OUT + train.WRIST_OUT)
         x = torch.zeros(2, 2, 96, 60)

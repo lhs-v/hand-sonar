@@ -107,6 +107,38 @@ class ProfilesTest(unittest.TestCase):
         self.assertEqual(300, int(np.argmax(env)))
         self.assertLessEqual(abs(int(np.argmax(env[330:351])) + 330 - 340), 1)
 
+    def test_split_halves_add_up_to_the_full_period(self):
+        tx = profiles.tx_template("none", 0.5, "triangle")
+        up, down = profiles.half_templates(tx)
+        np.testing.assert_array_equal(up + down, tx)
+        self.assertFalse(up[profiles.N // 2:].any() or down[: profiles.N // 2].any())
+        row = np.roll(tx, 7) + 0.3 * np.roll(tx, 7 + 40)
+        p = profiles.compute(np.tile(row, 30), tx, direct_floor=profiles.direct_min("triangle"), extra=(up, down))
+        (ur, ud), (dr, dd) = p.extra
+        self.assertEqual(p.raw.shape, ur.shape)
+        self.assertEqual(p.diff.shape, dd.shape)
+        np.testing.assert_allclose(ur + dr, p.raw, atol=1e-6 * np.abs(p.raw).max())  # 줄이 모두 같으면 3줄 중앙값도 그대로라 합이 맞는다
+        env = np.abs(hilbert(ur[:, 15]))
+        self.assertEqual(300, int(np.argmax(env)))  # 같은 칸 옮기기: 오름 반 상관도 직접 경로가 칸 300
+
+    def test_a_moving_echo_shifts_opposite_ways_in_the_up_and_down_halves(self):
+        # 0.5 m/s로 다가오는 반사체(거리는 그대로 두고 도플러 시간 압축만): 오름 반과 내림 반에서 메아리 봉우리가 반대 방향으로 어긋나고,
+        # 한 주기 상관에서는 둘이 상쇄돼 제자리 가까이 남는다(README 처프 모양)
+        tx = profiles.tx_template("none", 0.5, "triangle")
+        alpha = 1 + 2 * 0.5 / 343.0
+        m = np.arange(profiles.N, dtype=np.float64)
+        pos = alpha * (m - profiles.N / 2) + profiles.N / 2 - 7 - 50  # 줄 가운데에서 지연 57샘플(칸 350), 그 둘레로만 도플러 압축
+        row = np.roll(tx, 7) + 0.3 * np.sin(profiles.tx_phase("triangle", np.mod(pos, profiles.N))) * 0.5 * 32767
+        x = np.tile(row, 30)
+        p = profiles.compute(x, tx, direct_floor=profiles.direct_min("triangle"), extra=profiles.half_templates(tx))
+        def peak(raw):
+            env = np.abs(hilbert(raw[:, 15]))
+            return int(np.argmax(env[335:366])) + 335
+        up, down, full = peak(p.extra[0][0]), peak(p.extra[1][0]), peak(p.raw)
+        self.assertGreaterEqual(abs(up - down), 4)
+        self.assertLess((up - 350) * (down - 350), 0)  # 제자리(칸 350)를 사이에 두고 반대쪽
+        self.assertLessEqual(abs(full - 350), 2)
+
     def test_tx_spec_reads_the_shape_and_old_recordings_are_saw(self):
         self.assertEqual(("none", 0.5, "saw"), profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5}}))
         self.assertEqual(("none", 0.5, "triangle"), profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5, "shape": "triangle"}}))

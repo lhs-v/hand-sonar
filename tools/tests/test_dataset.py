@@ -231,6 +231,40 @@ class SessionFolderTest(unittest.TestCase):
             np.testing.assert_allclose(dataset.build(data, row_norm=True)[0]["x"], ds["x"], atol=1e-4)  # 정규화하면 흔들림이 없던 것과 같다
             self.assertGreater(float(np.abs(dataset.build(data)[0]["x"] - plain["x"]).max()), 0.01)  # 정규화하지 않으면 남는다
 
+    def test_split_channels_need_split_profiles_and_stack_in_order(self):
+        with tempfile.TemporaryDirectory() as data:
+            raw = write_session(data)
+            out = os.path.join(data, "processed", NAME)
+            ds, lines = dataset.build(data, channels="split")
+            self.assertIsNone(ds)  # profiles.py --split 전
+            self.assertTrue(any("--split" in line for line in lines), "\n".join(lines))
+            up, down = 0.6 * raw, 0.4 * raw[::-1]  # 오름·내림(가짜): 칸을 뒤집어 한 주기와 다른 무늬
+            files = {"profiles_up.npy": up, "profiles_down.npy": down, "diff_profiles_up.npy": np.abs(up[:, 1:]) - np.abs(up[:, :-1]),
+                     "diff_profiles_down.npy": np.abs(down[:, 1:]) - np.abs(down[:, :-1])}
+            for f, a in files.items():
+                np.save(os.path.join(out, f), a.astype(np.float32))
+            rz = dict(np.load(os.path.join(out, "rows.npz"), allow_pickle=False))
+            np.savez(os.path.join(out, "rows.npz"), **{**rz, "split": np.array(True)})
+            write_sync(data, LAG_MS)  # profiles.py가 rows.npz를 다시 쓰면 verify_sync.py·pairs.py도 다시(입력 지문)
+            self.assertTrue(pairs.run(data, NAME)[1])
+            base, _ = dataset.build(data)
+            split, lines = dataset.build(data, channels="split")
+            both, _ = dataset.build(data, channels="all")
+            self.assertIsNotNone(split, "\n".join(lines))
+            self.assertEqual(("base", "split", "all"), (str(base["channels"]), str(split["channels"]), str(both["channels"])))
+            self.assertEqual((4, 6), (split["x"].shape[1], both["x"].shape[1]))
+            want = dataset.stack_windows([(files["profiles_up.npy"].astype(np.float32), False), (files["profiles_down.npy"].astype(np.float32), False),
+                                          (files["diff_profiles_up.npy"].astype(np.float32), True),
+                                          (files["diff_profiles_down.npy"].astype(np.float32), True)], split["row"])
+            np.testing.assert_allclose(split["x"], want, atol=1e-5)
+            np.testing.assert_allclose(both["x"][:, :2], base["x"], atol=1e-6)  # all = base 두 채널 + split 네 채널
+            np.testing.assert_allclose(both["x"][:, 2:], split["x"], atol=1e-6)
+            normed, _ = dataset.build(data, channels="split", row_norm=True)  # 한 주기 원본의 줄 합으로 오름·내림도 나눈다
+            gain = dataset.row_gain(raw)
+            up_n, upd_n = dataset.row_normalized(files["profiles_up.npy"].astype(np.float32), gain)
+            np.testing.assert_allclose(normed["x"][:, 0], dataset.stack_windows([(up_n, False)], normed["row"])[:, 0], atol=1e-5)
+            np.testing.assert_allclose(normed["x"][:, 2], dataset.stack_windows([(upd_n, True)], normed["row"])[:, 0], atol=1e-5)
+
     def test_row_normalized_scales_rows_to_the_median_sum_and_leaves_empty_rows(self):
         raw = np.array([[1.0, -2.0, 0.0, 3.0], [1.0, 2.0, 0.0, -1.0]])  # 줄(열)마다 |값| 합 2 · 4 · 0 · 4, 0이 아닌 합의 중앙값 4
         norm, diff = dataset.row_normalized(raw)

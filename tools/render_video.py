@@ -108,12 +108,17 @@ def run_row_norm(saved):
     return bool(saved["row_norm"]) if "row_norm" in saved else False
 
 
+def run_channels(saved):
+    """그 실행 dataset.npz의 입력 채널 묶음(dataset.CHANNEL_SETS). 이 칸이 없는 옛 실행은 base다."""
+    return str(saved["channels"]) if "channels" in saved else "base"
+
+
 def predict_session(data, run, saved, k):
     """(세션 k 학습 자료 프레임의 예측 (M, 20, 3), 목표 (M, 20, 3), 장치). 창은 지금 처리 폴더에서 다시 만든다."""
     import torch
     import train
     name = str(saved["sessions"][k])
-    part, lines = dataset.session_data(data, name, gt=run_gt(saved), row_norm=run_row_norm(saved))
+    part, lines = dataset.session_data(data, name, gt=run_gt(saved), row_norm=run_row_norm(saved), channels=run_channels(saved))
     if part is None:
         raise ValueError(f"{name}: 학습 자료를 다시 만들지 못함 — " + " / ".join(lines))
     mine = saved["session"] == k
@@ -123,7 +128,7 @@ def predict_session(data, run, saved, k):
     if "bins" in ck and (list(ck["bins"]) != [dataset.BINS.start, dataset.BINS.stop] or int(ck["window"]) != dataset.WINDOW):
         raise ValueError(f"model.pt 입력(칸 {ck['bins']}, 창 {ck['window']}줄)이 지금 dataset(칸 {dataset.BINS.start}–{dataset.BINS.stop}, {dataset.WINDOW}줄)과 다름")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = train.make_model(int(ck.get("num_classes", train.FINGER_OUT)))  # --wrist로 학습한 모델은 손목 3값이 뒤에 붙는다
+    model = train.make_model(int(ck.get("num_classes", train.FINGER_OUT)), int(ck.get("in_chans", 2)))  # --wrist면 손목 3값이 뒤에, --channels면 입력 채널이 다르다
     model.load_state_dict(ck["state_dict"])
     model.to(device)
     pred = train.predict(model, torch.as_tensor(part["x"], device=device), np.arange(len(part["y"])))[:, :train.FINGER_OUT]

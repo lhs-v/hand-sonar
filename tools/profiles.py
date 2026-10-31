@@ -24,6 +24,10 @@
 6. 시간 방향 3줄 중앙값(끝 줄은 되풀이), 차분 |원본[t]| − |원본[t−1]|.
 7. 워치 녹음 계단(샘플 빠짐): "표지음 둘" 직선은 표지음 사이에만 계단이 없음을 확인했으므로, 세션 구간의 표지음 밖(앞뒤 여유)에 계단이
    있으면 계단 너머 줄을 ok=False로 둔다. "표지음 하나"(녹음 시각 조각)는 계단이 난 구간에 걸친 줄을 ok=False로 둔다.
+8. 오름·내림 나누기(--split, 삼각 녹음만, 2026-10-31): 템플릿을 오름 반(앞 300샘플)과 내림 반(뒤 300샘플)만 남긴 둘로 나눠 따로 상관하고,
+   같은 칸 옮기기·3줄 중앙값·차분을 건다(두 상관의 합 = 한 주기 상관). 한 주기로 맞춰 보면 움직이는 손가락의 도플러 거리 어긋남이 오름과
+   내림에서 반대로 생겨 상쇄되는데(README 처프 모양), 나누면 둘이 따로 남아 그 차이가 속도를 담는다. 반 길이라 채널마다 처리 이득은 3 dB 작다.
+   profiles_up.npy·profiles_down.npy·diff_profiles_up.npy·diff_profiles_down.npy(float32)로 쓰고 rows.npz split을 참으로 둔다. 톱니는 나누지 않는다.
 저장(processed/<세션>/): profiles.npy (600, R), diff_profiles.npy (600, R−1)는 공개 데이터와 같은 배치·자료형(float64)이고,
 rows.npz에 줄마다 첫 워치 프레임(frame), 줄 가운데의 폰 elapsedNs(ns), 옮기기 전 직접 경로 칸(direct), 직접 경로가 제자리에 있음(ok),
 포락선 최대 칸 − 따라간 칸(drift)과, 만든 바탕인 align.json의 SHA-256(alignSha)을 둔다. 셋 다 임시 파일에 쓴 뒤 이름을 바꾸고
@@ -120,6 +124,7 @@ class Profiles:
     drift: np.ndarray  # (R,) 포락선 최대 칸 − 따라간 칸(−300 … 299). 직접 경로가 없는 줄은 뜻이 없다
     has_direct: np.ndarray  # (R,) 포락선 최대가 칸 중앙값의 DIRECT_MIN배 이상
     moves: np.ndarray  # 따라간 칸을 옮긴 자리 k(direct[k] ≠ direct[k+1])
+    extra: tuple = ()  # compute(extra=템플릿들)마다 (raw, diff) — 같은 칸 옮기기·3줄 중앙값·차분
 
 
 def direct_min(shape):
@@ -127,12 +132,30 @@ def direct_min(shape):
     return DIRECT_MIN_TRIANGLE if shape == "triangle" else DIRECT_MIN
 
 
-def compute(x, tx, front=0, back=0, direct_floor=DIRECT_MIN):
-    """x = 앞 front샘플 + 600샘플 줄 R개 + 뒤 back샘플. 필터를 x 전체에 건 뒤 앞뒤를 버리고 줄로 나눈다. direct_floor = direct_min(모양)."""
+def half_templates(tx):
+    """삼각 처프 한 주기 템플릿에서 오름 반(앞 300샘플)·내림 반(뒤 300샘플)만 남기고 나머지를 0으로 둔 두 템플릿(합 = 원래 템플릿)."""
+    up = np.asarray(tx, dtype=np.float64).copy()
+    down = up.copy()
+    up[N // 2:] = 0.0
+    down[: N // 2] = 0.0
+    return up, down
+
+
+def _median3(aligned):
+    """줄 방향 3줄 중앙값(끝 줄은 되풀이) (R, 600)."""
+    prev = np.vstack([aligned[:1], aligned[:-1]])
+    nxt = np.vstack([aligned[1:], aligned[-1:]])
+    return np.maximum(np.minimum(prev, aligned), np.minimum(np.maximum(prev, aligned), nxt))  # 세 값의 중앙값
+
+
+def compute(x, tx, front=0, back=0, direct_floor=DIRECT_MIN, extra=()):
+    """x = 앞 front샘플 + 600샘플 줄 R개 + 뒤 back샘플. 필터를 x 전체에 건 뒤 앞뒤를 버리고 줄로 나눈다. direct_floor = direct_min(모양).
+    extra(템플릿들)를 주면 같은 줄을 그 템플릿으로도 상관해, 한 주기 상관으로 정한 칸 옮기기·3줄 중앙값·차분을 똑같이 건 (raw, diff)를 extra에 낸다."""
     y = sosfiltfilt(SOS, np.asarray(x, dtype=np.float64))
     y = y[front: len(y) - back]
     rows = y[: len(y) // N * N].reshape(-1, N)
-    prof = np.fft.irfft(np.fft.rfft(rows, axis=1) * np.conj(np.fft.rfft(tx)), n=N, axis=1)
+    spec = np.fft.rfft(rows, axis=1)
+    prof = np.fft.irfft(spec * np.conj(np.fft.rfft(tx)), n=N, axis=1)
     env = np.abs(hilbert(prof, axis=1))
     peaks = env.argmax(axis=1)
     ok = env.max(axis=1) >= direct_floor * np.median(env, axis=1)
@@ -148,12 +171,14 @@ def compute(x, tx, front=0, back=0, direct_floor=DIRECT_MIN):
     for k in moves:
         near_move[max(0, k - 1): k + 3] = True  # 줄 k−1 … k+2: 3줄 중앙값이 옮김을 번지게 하는 폭
     idx = (np.arange(N)[None, :] + direct[:, None] - ROW0) % N  # aligned[r, 300] = prof[r, direct[r]]
-    aligned = np.take_along_axis(prof, idx, axis=1)
-    prev = np.vstack([aligned[:1], aligned[:-1]])
-    nxt = np.vstack([aligned[1:], aligned[-1:]])
-    med = np.maximum(np.minimum(prev, aligned), np.minimum(np.maximum(prev, aligned), nxt))  # 세 값의 중앙값
+    med = _median3(np.take_along_axis(prof, idx, axis=1))
     diff = np.abs(med[1:]) - np.abs(med[:-1])
-    return Profiles(np.ascontiguousarray(med.T), np.ascontiguousarray(diff.T), direct, ok & steady & ~near_move, offset, drift, ok, moves)
+    more = []
+    for t in extra:
+        m = _median3(np.take_along_axis(np.fft.irfft(spec * np.conj(np.fft.rfft(t)), n=N, axis=1), idx, axis=1))
+        more.append((np.ascontiguousarray(m.T), np.ascontiguousarray((np.abs(m[1:]) - np.abs(m[:-1])).T)))
+    return Profiles(np.ascontiguousarray(med.T), np.ascontiguousarray(diff.T), direct, ok & steady & ~near_move, offset, drift, ok, moves,
+                    tuple(more))
 
 
 def step_rows(clock, frames, method, s1=None, s2=None):
@@ -200,8 +225,11 @@ def save_npy(path, array):
     return tmp
 
 
-def run(data, name):
-    """세션 하나: (보고 줄, 만들었는가)."""
+SPLIT_FILES = ("profiles_up.npy", "diff_profiles_up.npy", "profiles_down.npy", "diff_profiles_down.npy")  # --split: (원본, 차분) 오름·내림 차례
+
+
+def run(data, name, split=False):
+    """세션 하나: (보고 줄, 만들었는가). split이면 삼각 녹음은 오름·내림 프로파일도 쓴다(머리말 8)."""
     align_path = os.path.join(data, "processed", name, "align.json")
     align_sha = hs_io.sha256(align_path)
     info, a = align.load(data, name)
@@ -221,7 +249,9 @@ def run(data, name):
         return [f"{name}: 건너뜀(세션 구간이 워치 녹음 {rec.name} 밖)"], False
     pad = int(PAD_SEC * RATE)
     a0, b0 = max(0, r0 * N - pad), min(rec.frames, r1 * N + pad)
-    p = compute(rec.read(a0, b0), tx_template(window, amplitude, shape), r0 * N - a0, b0 - r1 * N, direct_min(shape))
+    tx = tx_template(window, amplitude, shape)
+    halves = half_templates(tx) if split and shape == "triangle" else ()
+    p = compute(rec.read(a0, b0), tx, r0 * N - a0, b0 - r1 * N, direct_min(shape), halves)
     frames = (r0 + np.arange(p.raw.shape[1], dtype=np.int64)) * N
     w = info["watch"]
     stepped = step_rows(rec.clock, frames, info["method"], (w["start"] or {}).get("frame"), (w["end"] or {}).get("frame"))
@@ -229,12 +259,18 @@ def run(data, name):
     out = hs_io.processed_folder(data, name)
     paths = {key: os.path.join(out, key) for key in ("profiles.npy", "diff_profiles.npy", "rows.npz")}
     tmps = {"profiles.npy": save_npy(paths["profiles.npy"], p.raw), "diff_profiles.npy": save_npy(paths["diff_profiles.npy"], p.diff)}
+    for key, arr in zip(SPLIT_FILES, [half for pair in p.extra for half in pair]):
+        paths[key] = os.path.join(out, key)
+        tmps[key] = save_npy(paths[key], arr.astype(np.float32))
     tmps["rows.npz"] = os.path.join(out, "rows.tmp.npz")
     np.savez(tmps["rows.npz"], frame=frames, ns=a.phone_ns(frames + N / 2), direct=p.direct.astype(np.int16), ok=ok,
-             drift=p.drift.astype(np.int16), recording=np.array(rec.name), alignSha=np.array(align_sha))
-    for key in ("profiles.npy", "diff_profiles.npy", "rows.npz"):  # rows.npz를 마지막에: 지문(alignSha)이 있는 쪽이 늘 가장 새것
+             drift=p.drift.astype(np.int16), recording=np.array(rec.name), alignSha=np.array(align_sha), split=np.array(bool(p.extra)))
+    for key in [k for k in tmps if k != "rows.npz"] + ["rows.npz"]:  # rows.npz를 마지막에: 지문(alignSha)이 있는 쪽이 늘 가장 새것
         os.replace(tmps[key], paths[key])
-    return report(name, info, frames, p, ok, stepped), True
+    lines = report(name, info, frames, p, ok, stepped)
+    if split:
+        lines.append("  오름·내림 나누기: " + ("profiles_up·down과 그 차분을 씀" if p.extra else f"하지 않음(처프 모양 {shape} — 삼각만 나눈다)"))
+    return lines, True
 
 
 def report(name, info, frames, p, ok, stepped):
@@ -259,13 +295,14 @@ def main():
     parser = argparse.ArgumentParser(description="세션마다 워치 에코 프로파일을 만든다")
     parser.add_argument("sessions", nargs="*", help="폰 세션 이름(없으면 모두)")
     parser.add_argument("--data", default=hs_io.DEFAULT_DATA)
+    parser.add_argument("--split", action="store_true", help="삼각 녹음은 오름·내림 반 프로파일도 쓴다(train.py --channels split|all)")
     args = parser.parse_args()
     missing = 0
     for name, why in hs_io.chosen(args.data, args.sessions):
         if why or not os.path.exists(os.path.join(args.data, "processed", name, "align.json")):
             print(f"{name}: 건너뜀({why or 'align.json 없음 — align.py를 먼저'})")
             continue
-        lines, made = hs_io.guarded(name, run, args.data, name)
+        lines, made = hs_io.guarded(name, run, args.data, name, args.split)
         print("\n".join(lines))
         missing += not made
     return 1 if missing else 0
