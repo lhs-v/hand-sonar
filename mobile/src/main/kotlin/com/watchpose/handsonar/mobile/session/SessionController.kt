@@ -178,7 +178,8 @@ private class FoundMarker(val found: MarkerFound, val elapsedNs: Long?)
  * 화면이 다시 만들어져도 세션이 이어진다. 화면은 [ui]·[frame]을 그리고 메서드를 부른다. 메서드는 메인 스레드에서 부른다.
  *
  * 세션 흐름: [startSession] → 폴더·meta.json(시작) → 폰 녹음·프레임 기록·폰 센서 기록 시작 → 0.3 s 뒤 시작 표지음 + [SessionRunner] 시작 →
- * 기준 자세(CALIB: 팔뚝과 손을 함께 세운 평행 자세가 2 s 이어지면 넘어감, 건너뛸 수 있음) → 50 ms마다 tick → EndMarkerDue에 끝 표지음 →
+ * 기준 자세(CALIB: 팔뚝과 손을 함께 세운 평행 자세가 2 s 이어지면 넘어감, 건너뛸 수 있음. [CALIBRATE]일 때만 — 2026-10-31부터 끔) → 50 ms마다
+ * tick → EndMarkerDue에 끝 표지음 →
  * Finished에 [finishSession](파일 닫기, 끝 표지음 찾기, 통계, meta.json 마무리) → 요약 화면.
  * 기준 자세 판정([CalibrationGate]): 새 카메라 프레임마다 손이 그림 평면에서 그림 속 수직선(폰 가속도로 정함)과 이루는 각, 손가락 펴짐, 워치가
  * 보낸 기울기([TiltMessage], 받은 지 1 s 안)로 본 팔뚝 각을 넣는다. MediaPipe 깊이는 쓰지 않는다(그림 투영에 맞춘 값이라). 결과는 prompts.csv
@@ -444,7 +445,7 @@ class SessionController(private val app: Application) {
         recorder = FrameRecorder(dir)
         // 폰 센서(전송 설계 §8): 폰이 그대로였는지(가속도·자이로)와 카메라 조건(주변 밝기). 못 열어도 세션은 이어 가고 meta.json에 남긴다.
         sensors = SensorRecorder(app, dir, SensorPlan.PHONE_BASE, SensorPlan.PHONE).also { it.start() }
-        val r = SessionRunner(plan, calibrate = true)
+        val r = SessionRunner(plan, calibrate = CALIBRATE)
         runner = r
         gate.reset()
         gateFrameNs = 0L
@@ -913,6 +914,12 @@ class SessionController(private val app: Application) {
     }
 
     private companion object {
+        /**
+         * 시작 표지음 뒤 기준 자세(옆면 → 정면) 단계. 2026-10-31부터 끔: 손목 정답의 손 3D를 HaMeR로 바꾸자 방위는 동작으로 맞춰도 같고
+         * (20261031-115740에서 손목 정답 차이 중앙 0.3°), 정면 기준 자세를 0점으로 빼면 평소 젖힘(약 25°)만 지워 PC가 더는 쓰지 않는다
+         * (연구 현황 §5.8). 켜면 예전처럼 잡는다.
+         */
+        const val CALIBRATE = false
         const val PREFS = "phone"
         const val PREF_HAND = "hand"
         const val PREF_PLACE = "ctx.place"

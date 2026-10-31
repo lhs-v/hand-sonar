@@ -60,16 +60,6 @@ class YawTest(unittest.TestCase):
             v = p[m, 9] - p[m, 0]
             np.testing.assert_allclose(axes[m, 0], v / np.linalg.norm(v), atol=1e-12)
 
-    def test_zero_rotation_sends_the_neutral_direction_to_straight(self):
-        mean = np.array([math.cos(0.3), 0.05, math.sin(0.3)])  # 정면 기준 자세에서 읽힌 젖힘 약 17°
-        q = wrist.zero_rotation(mean)
-        np.testing.assert_allclose(q @ (mean / np.linalg.norm(mean)), [1.0, 0.0, 0.0], atol=1e-12)
-        np.testing.assert_allclose(q @ q.T, np.eye(3), atol=1e-12)
-        self.assertAlmostEqual(1.0, float(np.linalg.det(q)), places=12)
-        e, _ = wrist.extension_deviation((q @ np.array([math.cos(0.5), 0.0, math.sin(0.5)]))[None])
-        self.assertAlmostEqual(math.degrees(0.5 - 0.3), float(e[0]), delta=0.5)  # 같은 축으로 더 젖힌 것은 차이만 남는다
-        np.testing.assert_allclose(wrist.zero_rotation([2.0, 0.0, 0.0]), np.eye(3), atol=1e-12)
-
     def test_extension_and_deviation_angles(self):
         e, d = wrist.extension_deviation(np.array([[math.cos(0.5), 0.0, math.sin(0.5)], [math.cos(0.3), math.sin(0.3), 0.0]]))
         np.testing.assert_allclose(e, [math.degrees(0.5), 0.0], atol=1e-9)

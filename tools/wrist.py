@@ -12,7 +12,8 @@
   - 기준 자세(prompts.csv classId −4 옆면·−3 정면, flag 없음, 평행 자세 유지 구간)가 있으면 그 프레임에서 손 축 셋(손 방향·새끼 쪽·손등
     쪽)을 워치 축 x·y·z에 맞춘다("calibration"). 옆면(엄지가 카메라 쪽)은 손등·손바닥 쪽 꺾임이, 정면은 새끼·엄지 쪽 꺾임이 그림 평면에
     있어 앱이 그림 각으로 확인한 자세다.
-  - 없으면(이 기능 전 세션) 손가락·ASL 동작(classId 0–14, 동작 시작 0.5 s 뒤) 프레임에서 손의 새끼 쪽 축만 워치 y축에 맞춘다("ulnar").
+  - 없으면(이 기능 전 세션과 앱이 기준 자세를 끈 2026-10-31 뒤 세션) 손가락·ASL 동작(classId 0–14, 동작 시작 0.5 s 뒤) 프레임에서 손의
+    새끼 쪽 축만 워치 y축에 맞춘다("ulnar").
     손목을 손등·손바닥 쪽으로 꺾어도 그 축은 돌지 않아, 평소 수집 자세의 젖힘(실데이터 약 25°)에 흔들리지 않는다. 옆 꺾임·비틀림은 평균 0으로 본다.
   방위가 틀려도 u에는 cos(손의 앙각)만큼 줄어 들어간다(손을 세운 평소 자세면 앙각 약 70°라 방위 10° 오차가 u에 약 3.4°).
 - 카메라 축 K: MediaPipe world는 거울 그림 기준이라 x를 뒤집은 것(joints.to_left)이 K다 — x 카메라가 본 그림 오른쪽, y 아래, z 카메라에서
@@ -20,10 +21,12 @@
 - 깊이: MediaPipe 3D는 그림 투영에 맞춘 값이라 K의 z(카메라 쪽) 성분을 믿기 어렵다(실데이터: 손목 굽히기에서 깊이 기울기의 부호가 세션마다
   갈림, 그림 평면 성분은 그림 속 길이와 맞음). 그래서 프레임마다 카메라 깊이 축을 워치 축으로 적은 d(3값)도 내고, 학습 손실이 그 성분을
   가볍게 본다(train.py --wrist).
-- 0점(정면 기준 자세): 정면 기준 자세가 있으면 그 구간의 평균 손 방향을 (1, 0, 0)으로 보내는 회전을 모든 프레임의 u·d에 건다
-  ("calibration+zero", zero_rotation). 앱이 확인한 평행 자세를 0으로 두는 것이다. 정면 기준 자세에서 읽힌 젖힘(실데이터 20261031-115740: 17°)은
-  카메라 쪽 깊이에서 오고(앱은 그 축을 그림 평면 각으로 보지 못한다), 본편도 같은 정면이라 같은 치우침이 모든 프레임에 들어 있어 빼면 사라진다.
-  옆면에서는 손등 쪽 꺾임이 그림 평면에 있어 MediaPipe 깊이에 덜 기대므로, 정면 − 옆면 젖힘을 깊이 치우침 추정으로 보고한다.
+- 0점은 빼지 않는다(2026-10-31): u = (1, 0, 0)은 손이 워치 x축과 일자일 때다(몸의 일자가 아니라 워치 기준). 메아리를 바꾸는 것은 워치에 대한
+  손 방향이라 이것이 메아리와 맞는 정답이다. 한때 정면 기준 자세의 평균 손 방향을 (1, 0, 0)으로 보내는 회전을 걸었다(MediaPipe 깊이 치우침을
+  빼려고). HaMeR 3D로 보니 20261031-115740의 정면 기준 자세(24° 젖힘)가 같은 세션 숫자 5(24.7°)와 같아, 앱이 '평행'으로 통과시킨 자세가 실은
+  평소 자세였다(앱은 정면에서 깊이 방향을 보지 못한다). 그 회전은 세션마다 기준 자세를 잡은 만큼 정답을 통째로 밀 뿐이라(메아리로는 알 수 없는
+  세션별 치우침) 뺐다. 같은 세션에서 기준 자세 방위와 동작 방위(ulnar)의 차이는 u에 중앙 0.3°라 앱의 기준 자세 단계도 껐다.
+  기준 자세가 있으면 그 구간의 젖힘·꺾임을, 옆면·정면이 둘 다 있으면 정면 − 옆면 젖힘(깊이 치우침 추정 — 옆면은 손등 쪽 꺾임이 그림 평면)을 보고한다.
 - 손 3D: 처리 폴더에 hamer.npz(hamer_keypoints.py — HaMeR 단안 3D 손 복원)가 있고 프레임이 landmarks.csv와 같으면 그 관절을 쓰고("hamer"),
   아니면 MediaPipe world를 쓴다("mediapipe"). 손목 굽히기를 숫자 5와 견주면 MediaPipe는 10세션 중 5개만 바른 방향이었고 HaMeR는 10개 모두
   맞혔다(보고서 hand-sonar/2026-10-31-hamer-wrist-check). 두 3D는 같은 축(거울 그림 기준 카메라 축)이다.
@@ -47,9 +50,8 @@ KP = 1.0  # Mahony 비례 이득(rad/s): 중력으로 기울기를 바로잡는 
 KI = 0.02  # 적분 이득: 자이로 치우침 추정
 MAX_GAP_MS = 20.0  # 카메라 프레임에서 가장 가까운 자이로 표본이 이보다 멀면 그 프레임은 쓰지 않는다(표본 간격 10 ms)
 EDGE_SEC = 0.5  # 동작 시작 뒤 이 안은 맞춤에 쓰지 않는다(pairs.EDGE_SEC와 같음)
-NEUTRAL = -3  # prompts.csv 기준 자세 정면(shared Labels.NEUTRAL_ID) — 0점
+NEUTRAL = -3  # prompts.csv 기준 자세 정면(shared Labels.NEUTRAL_ID)
 NEUTRAL_SIDE = -4  # 기준 자세 옆면(shared Labels.NEUTRAL_SIDE_ID)
-MIN_ZERO = 10  # 0점을 잡을 정면 기준 자세 프레임 하한(2 s 유지면 초당 19프레임에서 약 40)
 HAMER_FILE = "hamer.npz"  # hamer_keypoints.py가 처리 폴더에 쓰는 손 3D
 REF_CLASSES = range(0, 15)  # 기준 자세가 없을 때 방위를 맞출 동작: 손가락 굽히기·ASL 숫자(손목은 그대로 두는 동작)
 PHONE_STILL = 0.1  # 폰 자이로 99% 값(rad/s)이 이보다 크면 폰이 움직인 세션이라 알린다(실데이터 0.005–0.017)
@@ -98,16 +100,6 @@ def mahony(t_ns, gyro, up):
                   (2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)),
                   (2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)))
     return out, np.array([bx, by, bz])
-
-
-def zero_rotation(mean_u):
-    """평균 손 방향 mean_u(워치 축)를 (1, 0, 0)으로 보내는 가장 작은 회전 (3, 3). 정면 기준 자세를 0점으로 둘 때 u·d에 건다."""
-    v = np.asarray(mean_u, dtype=np.float64) / np.linalg.norm(mean_u)
-    axis = np.cross(v, [1.0, 0.0, 0.0])
-    s = float(np.linalg.norm(axis))
-    if s < 1e-12:
-        return np.eye(3) if v[0] > 0 else np.diag([-1.0, -1.0, 1.0])
-    return rot_axis(axis / s, math.atan2(s, float(v[0])))
 
 
 def rotation_to_z(v):
@@ -253,11 +245,6 @@ def session_wrist(data, name):
     u = np.einsum("mac,mc->ma", to_watch, np.nan_to_num(axes[:, 0]))
     depth = to_watch[:, :, 2]
     u[~ok] = 0.0
-    raw_ext, raw_dev = extension_deviation(u)  # 0점을 빼기 전(기준 자세 보고용)
-    if front.sum() >= MIN_ZERO:
-        zero = zero_rotation(u[front].mean(axis=0))
-        u, depth = u @ zero.T, depth @ zero.T
-        method += "+zero"
     # 보고: 방위가 세션 동안 흔들렸는지(맞춤 프레임 셋으로 나눠), 기준 자세에서 손이 팔과 얼마나 맞았는지, 동작 종류별 젖힘·꺾임
     idx = np.flatnonzero(ref)
     thirds = [math.degrees(fit_yaw(*yaw_pairs(c0, axes[s], rot_f[s], method))) for s in np.array_split(idx, 3) if len(s)]
@@ -272,12 +259,10 @@ def session_wrist(data, name):
             hand_elev = np.degrees(np.arcsin(np.clip(axes[sel, 0] @ cam.T @ np.array([0, 0, 1.0]), -1, 1)))
             arm_elev = np.degrees(np.arcsin(np.clip(np.abs(rot_f[sel][:, 2, 0]), -1, 1)))
             lines.append(f"  기준 자세 {label} {int(sel.sum())}프레임: 손 앙각 {np.median(hand_elev):.1f}°(카메라·폰 중력) · 팔뚝 앙각 {np.median(arm_elev):.1f}°(워치),"
-                         f" 0점 빼기 전 젖힘 {np.median(raw_ext[sel]):.1f}° · 꺾임 {np.median(raw_dev[sel]):.1f}°")
+                         f" 젖힘 {np.median(ext[sel]):.1f}° · 꺾임 {np.median(dev[sel]):.1f}°")
     if side.any() and front.any():
-        lines.append(f"  깊이 치우침 추정(정면 − 옆면 젖힘): {np.median(raw_ext[front]) - np.median(raw_ext[side]):+.1f}°"
+        lines.append(f"  깊이 치우침 추정(정면 − 옆면 젖힘): {np.median(ext[front]) - np.median(ext[side]):+.1f}°"
                      " — 옆면은 손등 쪽 꺾임이 그림 평면에 있다")
-    if method.endswith("+zero"):
-        lines.append("  아래 동작별 값은 정면 기준 자세를 0점으로 뺀 각도다")
     for c, label in ((10, "숫자 5"), (15, "손목 젖히기"), (16, "손목 굽히기"), (17, "새끼 쪽 꺾기"), (-1, "자유 동작")):
         sel = ok & settled & (cls == c)
         if sel.sum() >= 10:

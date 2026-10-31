@@ -42,7 +42,7 @@
 dataset.npz(allow_pickle 없이 읽힘): y (N, 60) float32(단위 손 손바닥 틀, 점 1–20 × xyz),
 frame_ns (N,) int64, session (N,) int16, row (N,) int64, prompt (N,) int32, class_id (N,) int16(라벨 없음 −99), flag (N,) 문자열,
 edge·labelled (N,) bool, v9 (N, 3) float32(m, 거울을 되돌린 카메라 좌표의 p9 − p0), wrist·wrist_depth (N, 3) float32와 wrist_ok (N,) bool
-(손목 정답, 위), wrist_method (S,) 문자열("calibration+zero" | "calibration" | "ulnar" | ""), wrist_source (S,) 문자열(손 3D: "hamer" |
+(손목 정답, 위), wrist_method (S,) 문자열("calibration" | "ulnar" | ""), wrist_source (S,) 문자열(손 3D: "hamer" |
 "mediapipe" | ""), gt () 문자열(손가락 정답의 3D, 위 — 이 칸이 없는 옛 dataset.npz는 "mediapipe"), sessions·hands (S,) 문자열,
 length_mm (S,) float64(세션의 L), rewear (S,) bool(meta.json rewear), wear (S,) int64(착용 번호, wear_episodes — 옛 dataset.npz에는 없고 그때는
 rewear로 만든다), wall_ms (S,) float64(meta start wallMs), label_ids (K,) int16,
