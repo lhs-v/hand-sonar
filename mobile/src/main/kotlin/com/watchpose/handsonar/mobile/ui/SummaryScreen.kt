@@ -36,7 +36,9 @@ fun SummaryScreen(ui: UiState, c: SessionController) {
                 s.fps?.let { "%.1f".format(it) + if (s.delegate.isNotEmpty()) " · ${s.delegate}" else "" } ?: "—",
                 if ((s.fps ?: 0.0) >= SessionChecks.MIN_FPS) Level.OK else Level.WARN,
             )
-            StatusRow("워치 처프", percent(s.watchRatio), if (s.watchRatio >= SessionChecks.MIN_WATCH_RATIO) Level.OK else Level.WARN)
+            // 워치 녹음: 기울기를 받고 있던 시간 비율(폰 마이크로는 처프가 잘 안 들려 처프 비율은 meta.json에만 둔다)
+            val link = s.watchLinkRatio
+            StatusRow("워치 연결", percent(link), if (link != null && link >= SessionChecks.MIN_LINK_RATIO) Level.OK else Level.WARN)
             StatusRow("시작 표지음", if (s.startMarker) "찾음" else "못 찾음", if (s.startMarker) Level.OK else Level.BAD)
             StatusRow("끝 표지음", if (s.endMarker) "찾음" else "못 찾음", if (s.endMarker) Level.OK else Level.BAD)
             StatusRow("영상·소리", if (s.videoOk) "저장됨" else "오류", if (s.videoOk) Level.OK else Level.BAD)

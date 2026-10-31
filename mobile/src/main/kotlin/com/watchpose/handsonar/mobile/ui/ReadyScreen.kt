@@ -39,9 +39,10 @@ import com.watchpose.handsonar.shared.SessionContext
 import com.watchpose.handsonar.shared.Strap
 
 /**
- * 준비 화면(설계 §6.1-1): 추적하는 손(워치를 찬 손, "추적" 버튼으로 왼손·오른손을 고름)이 보이는지, 워치 처프가 들리는지,
+ * 준비 화면(설계 §6.1-1): 추적하는 손(워치를 찬 손, "추적" 버튼으로 왼손·오른손을 고름)이 보이는지, 워치가 녹음 중인지,
  * 표지음 자기 확인이 됐는지. 손·표지음이 녹색이고 장치에 오류가 없으면 시작 버튼이 켜진다.
- * 워치 처프가 안 들리면 확인 창을 거쳐 시작할 수 있다. 이어폰·블루투스 오디오가 연결돼 있으면 경고만 띄운다(표지음이 스피커로 안 나가면
+ * 워치 녹음 중은 워치 기울기(녹음 중인 워치만 보냄)로 보고, 못 받으면 처프가 들리는지로 본다(폰 마이크로는 처프가 잘 안 들림, [watchStatus]).
+ * 기울기도 없고 처프도 안 들리면 확인 창을 거쳐 시작할 수 있다. 이어폰·블루투스 오디오가 연결돼 있으면 경고만 띄운다(표지음이 스피커로 안 나가면
  * 표지음 자기 확인이 녹색이 안 돼 시작이 막힌다). 맨 아래에 워치에서 받은 녹음 줄([inbox], 전송 설계 §3)이 있다.
  * 세션 정보(전송 설계 §8, 계획 6): 장소(누르면 쓰는 창), 자세·팔 받침·줄 조임(칩 — 고른 칩을 다시 누르면 지움), "워치 다시 참"(워치를 벗었다
  * 다시 찼으면 켬 — 다음 세션이 보관되면 꺼진다). 고른 값은 다음 실행에도 남고 세션을 시작할 때 meta.json에 들어간다. 50 cm에서 읽히게 칩 글자를
@@ -77,10 +78,9 @@ fun ReadyScreen(ui: UiState, c: SessionController, inbox: InboxStatus, onRequest
                 if (ui.handVisible) "보임" else "안 보임 — ${ui.trackedHand.label}을 카메라 앞에",
                 if (ui.handVisible) Level.OK else Level.BAD,
             )
-            val (chirpText, chirpLevel) = chirpStatus(ui.chirp)
-            StatusRow("워치 처프", chirpText, chirpLevel)
-            // 기준 자세에서 팔뚝이 섰는지 보는 값(녹음 중인 워치가 보낸다). 없으면 손만 보고 넘어간다.
-            StatusRow("워치 기울기", if (ui.watchTilt) "받는 중" else "없음 — 워치 녹음을 먼저 켜세요", if (ui.watchTilt) Level.OK else Level.WARN)
+            // 워치 녹음 중: 기울기(기준 자세에서 팔뚝도 이것으로 본다)를 받으면 확실, 아니면 처프로
+            val (watchText, watchLevel) = watchStatus(ui.watchTilt, ui.chirp)
+            StatusRow("워치", watchText, watchLevel)
             val self = ui.selfCheck
             StatusRow(
                 "표지음",
@@ -115,7 +115,7 @@ fun ReadyScreen(ui: UiState, c: SessionController, inbox: InboxStatus, onRequest
                 )
                 BigButton(
                     "시작",
-                    { if (ui.chirp == null || ui.chirp.heard == ChirpHeard.NONE) confirmNoWatch = true else c.startSession() },
+                    { if (!ui.watchTilt && (ui.chirp == null || ui.chirp.heard == ChirpHeard.NONE)) confirmNoWatch = true else c.startSession() },
                     Modifier.weight(1f),
                     enabled = canStart,
                 )
@@ -176,8 +176,8 @@ fun ReadyScreen(ui: UiState, c: SessionController, inbox: InboxStatus, onRequest
                 }) { Text("그래도 시작") }
             },
             dismissButton = { TextButton(onClick = { confirmNoWatch = false }) { Text("그만두기") } },
-            title = { Text("워치 처프가 안 들립니다") },
-            text = { Text("워치 녹음이 켜져 있는지 확인하세요. 처프 없이 모은 세션은 학습에 쓸 수 없습니다.") },
+            title = { Text("워치 녹음을 확인하지 못했습니다") },
+            text = { Text("워치 기울기를 받지 못했고 처프도 들리지 않습니다. 워치 녹음이 켜져 있는지 확인하세요. 워치 녹음 없이 모은 세션은 학습에 쓸 수 없습니다.") },
         )
     }
     if (editPlace) {

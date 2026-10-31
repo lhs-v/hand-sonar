@@ -39,7 +39,8 @@ private const val HAND_LOST_WARN_MS = 1_000L
 
 /**
  * 수집 화면(설계 §6.1-2): 왼쪽에 거울 미리보기·관절 뼈대·상태 표, 오른쪽에 지금 동작(이름·설명·손 모양), 남은 시간 막대, 다음 동작,
- * 세션 진행 막대, 일시정지·틀림·취소. 손이 1 s 넘게 안 보이거나 워치 처프가 30 s 내리 안 들리면 미리보기 아래에 경고한다(설계 §6.5·§6.6).
+ * 세션 진행 막대, 일시정지·틀림·취소. 손이 1 s 넘게 안 보이거나, 이 세션에서 받던 워치 기울기가 10 s 넘게 끊기면 미리보기 아래에 경고한다
+ * (설계 §6.5·§6.6). 폰 마이크로는 워치 처프가 잘 안 들려 처프로는 경고하지 않는다(2026-10-31 사용자).
  * 기준 자세 단계(세션 처음)에는 팔뚝·손·손가락 판정 세 줄과 유지 막대를 보이고, "틀림" 자리에 "건너뛰기"를 둔다.
  */
 @Composable
@@ -50,8 +51,8 @@ fun CollectScreen(ui: UiState, c: SessionController) {
             CameraView(c.frame, Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)))
             Column(Modifier.align(Alignment.TopStart).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusChip(if (ui.handVisible) "손 인식" else "손 없음", if (ui.handVisible) Level.OK else Level.BAD)
-                val (chirpText, chirpLevel) = chirpStatus(ui.chirp)
-                StatusChip("워치 $chirpText", chirpLevel)
+                val (watchText, watchLevel) = watchStatus(ui.watchTilt, ui.chirp, short = true)
+                StatusChip(watchText, watchLevel)
                 StatusChip(
                     when (ui.startMarkerFound) {
                         null -> "표지음 확인 중"
@@ -67,7 +68,7 @@ fun CollectScreen(ui: UiState, c: SessionController) {
             }
             val warning = when {
 (ui.phase == RunnerPhase.PROMPT || ui.phase == RunnerPhase.CALIB) && ui.handLostMs > HAND_LOST_WARN_MS -> "손이 안 보입니다 — 카메라 앞으로"
-                ui.watchGapWarning -> "워치 처프가 안 들립니다"
+                ui.watchLinkLost -> "워치 기울기가 끊겼습니다 — 워치 녹음을 확인하세요"
                 else -> null
             }
             if (warning != null) {

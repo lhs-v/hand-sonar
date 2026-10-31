@@ -42,6 +42,8 @@ data class SessionStats(
     val startMarker: MarkerMeta?,
     val endMarker: MarkerMeta?,
     val durationSec: Double,
+    /** 세션 동안 워치 기울기(녹음 중인 워치만 보냄, [TiltMessage])를 1 s 안에 받고 있던 시간 비율. 이 칸 전 세션은 null. */
+    val watchLinkRatio: Double? = null,
 )
 
 /**
@@ -115,6 +117,7 @@ data class SessionMeta(
                         "end" to s.endMarker?.let { markerMap(it) },
                     ),
                     "durationSec" to s.durationSec,
+                    "watchLinkRatio" to s.watchLinkRatio,
                 )
             },
             "rewear" to rewear,

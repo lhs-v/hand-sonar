@@ -22,6 +22,13 @@ class SessionChecksTest {
     }
 
     @Test
+    fun watchLinkClearsTheWatchSuspicionWhenTheChirpIsNotHeard() {
+        assertEquals(emptyList<String>(), SessionChecks.flags(0.95, 0.0, true, true, watchLinkRatio = 0.9)) // 폰에 처프가 안 들려도 기울기를 받았다
+        assertEquals(listOf("suspect-watch"), SessionChecks.flags(0.95, 0.0, true, true, watchLinkRatio = 0.2)) // 기울기도 거의 못 받음
+        assertEquals(listOf("suspect-watch"), SessionChecks.flags(0.95, 0.0, true, true, watchLinkRatio = null)) // 기울기 칸 전 세션은 처프만 본다
+    }
+
+    @Test
     fun measuredFpsIsFrameGapsOverTheFirstToLastSpan() {
         // 301프레임 = 간격 300개가 10 s에 걸림 → 초당 30
         assertEquals(30.0, assertNotNull(SessionChecks.measuredFps(301, 0, 10_000_000_000)), 1e-9)

@@ -130,7 +130,8 @@ private fun RecordRow(s: SessionSummary, onTrash: () -> Unit, onRestore: () -> U
             Column(Modifier.weight(1f)) {
                 Text(dateTime(s.startWallMs), style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "${mmss(s.durationSec.toInt())} · 손 ${percent(s.handRatio)} · 워치 ${percent(s.watchRatio)} · " +
+                    "${mmss(s.durationSec.toInt())} · 손 ${percent(s.handRatio)} · " +
+                        (s.watchLinkRatio?.let { "워치 연결 ${percent(it)}" } ?: "워치 처프 ${percent(s.watchRatio)}") + " · " +
                         "표지음 ${mark(s.startMarker)}${mark(s.endMarker)}",
                     style = MaterialTheme.typography.bodyLarge,
                 )

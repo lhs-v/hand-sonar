@@ -93,14 +93,16 @@ fun WarningText(text: String) {
     Text("⚠ $text", style = MaterialTheme.typography.titleMedium, color = StatusColors.warn)
 }
 
-/** 워치 처프 상태 글과 수준. 괄호 안은 봉우리/잡음 비. */
-fun chirpStatus(c: ChirpCheck?): Pair<String, Level> {
-    if (c == null) return "확인 중…" to Level.IDLE
-    return when (c.heard) {
-        ChirpHeard.HEARD -> "들림 (%.0f)".format(c.ratio) to Level.OK
-        ChirpHeard.WEAK -> "약함 (%.0f)".format(c.ratio) to Level.WARN
-        ChirpHeard.NONE -> "안 들림 — 워치 녹음을 켜세요" to Level.BAD
-    }
+/**
+ * 워치가 녹음 중인지(준비 화면 한 줄과 수집 화면 칩). 기울기([UiState.watchTilt] — 녹음 중인 워치만 보냄)를 받으면 확실하다. 못 받으면 처프가
+ * 들리는지로 본다. 폰 마이크로는 처프가 잘 안 들려(2026-10-31 사용자) 처프가 안 들리는 것만으로는 빨강이 아니라 노랑이다.
+ * [short]면 칩에 맞게 짧게 쓴다.
+ */
+fun watchStatus(tilt: Boolean, chirp: ChirpCheck?, short: Boolean = false): Pair<String, Level> = when {
+    tilt -> (if (short) "워치 녹음 중" else "녹음 중(기울기 받는 중)") to Level.OK
+    chirp?.heard == ChirpHeard.HEARD || chirp?.heard == ChirpHeard.WEAK ->
+        (if (short) "워치 처프만" else "처프는 들림 — 기울기 없음(기준 자세는 손만 봄)") to Level.WARN
+    else -> (if (short) "워치 확인 안 됨" else "확인 안 됨 — 워치 녹음을 먼저 켜세요") to Level.WARN
 }
 
 fun mmss(sec: Int): String = "%d:%02d".format(sec / 60, sec % 60)

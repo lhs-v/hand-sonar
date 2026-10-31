@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import androidx.annotation.MainThread
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.gms.wearable.MessageClient
@@ -88,6 +89,8 @@ data class SummaryInfo(
     val rewear: Boolean,
     /** 기준 자세 결과(meta.json `calibration`). 그 단계 전에 끝났으면 null. */
     val calibration: CalibrationMeta? = null,
+    /** 세션 동안 워치 기울기를 받고 있던 시간 비율(meta.json `stats.watchLinkRatio`). */
+    val watchLinkRatio: Double? = null,
 )
 
 /**
@@ -133,7 +136,10 @@ data class UiState(
      * (되돌리기·기록 화면) 다시 켜지며, 그 뒤 되살리면 다시 꺼진다(shared `RewearMark`).
      */
     val rewear: Boolean = false,
-    /** 워치 기울기(녹음 중인 워치가 0.2 s마다 보냄)를 최근 1 s 안에 받았다. 기준 자세에서 팔뚝이 섰는지 보는 데 쓴다. */
+    /**
+     * 워치 기울기(녹음 중인 워치가 0.2 s마다 보냄)를 최근 1 s 안에 받았다. 기준 자세에서 팔뚝이 섰는지 보고, "워치 녹음 중" 표시로도 쓴다
+     * (폰 마이크로는 워치 처프가 잘 안 들려 처프보다 확실하다).
+     */
     val watchTilt: Boolean = false,
     // 수집 중
     val phase: RunnerPhase = RunnerPhase.IDLE,
@@ -146,7 +152,8 @@ data class UiState(
     val elapsedSec: Int = 0,
     val plannedSec: Int = 0,
     val startMarkerFound: Boolean? = null,
-    val watchGapWarning: Boolean = false,
+    /** 이 세션에서 받던 워치 기울기가 [LINK_LOST_MS] 넘게 끊겼다(워치 녹음이 멈췄을 수 있다). 처음부터 못 받았으면 거짓(시작 때 이미 물었다). */
+    val watchLinkLost: Boolean = false,
     /** 기준 자세 단계(또는 그 단계에서 일시정지)면 판정 모습, 아니면 null. */
     val calibration: CalibrationUi? = null,
     val busy: Boolean = false,
@@ -216,8 +223,6 @@ class SessionController(private val app: Application) {
         // 외부 출력 감시는 앱 수명 동안 이어 가므로(조정자가 앱 하나에 하나) 풀지 않는다. 시작 때 현재 목록을 한 번 채운다.
         audioManager?.registerAudioDeviceCallback(outputCallback, Handler(Looper.getMainLooper()))
         refreshOutputs()
-        // 워치 기울기도 앱 수명 동안 듣는다(준비 화면에 받는지 보이고, 기준 자세에서 팔뚝을 본다). 못 달면 손만 보고 판정한다.
-        runCatching { Wearable.getMessageClient(app).addListener(tiltListener) }
     }
 
     @Volatile private var lastHandNs = 0L
@@ -251,6 +256,17 @@ class SessionController(private val app: Application) {
             tilt = it
             tiltAtNs = SystemClock.elapsedRealtimeNanos()
         }
+    }
+
+    // 세션 동안 기울기 연결(주 스레드만): 50 ms tick 수와 그중 기울기가 1 s 안이던 수, 이 세션에서 한 번이라도 받았는가
+    private var sessionTicks = 0
+    private var linkTicks = 0
+    private var linkSeen = false
+
+    init {
+        // 워치 기울기도 앱 수명 동안 듣는다(준비 화면에 받는지 보이고, 기준 자세에서 팔뚝을 본다). 못 달면 손만 보고 판정한다.
+        // tiltListener 선언 뒤에 둔다: 클래스 앞쪽 init 블록에서는 아직 null이라 등록이 조용히 실패했다(2026-10-31 실기기 "워치 기울기 없음").
+        Wearable.getMessageClient(app).addListener(tiltListener).addOnFailureListener { Log.w(TAG, "워치 기울기 수신기를 못 담", it) }
     }
 
     /** 권한을 받은 뒤(화면이 다시 만들어질 때마다) 부른다: 카메라를 이 화면에 잇고, 마이크·표지음을 연다. */
@@ -428,6 +444,9 @@ class SessionController(private val app: Application) {
         gateFrameNs = 0L
         gatePhaseNs = -1L
         calibration = null
+        sessionTicks = 0
+        linkTicks = 0
+        linkSeen = false
         state.update {
             it.copy(
                 screen = Screen.COLLECT,
@@ -594,6 +613,11 @@ class SessionController(private val app: Application) {
     }
 
     private fun tick(r: SessionRunner, now: Long) {
+        sessionTicks++
+        if (freshTilt(now) != null) {
+            linkTicks++
+            linkSeen = true
+        }
         for (event in r.tick(now)) {
             when (event) {
                 RunnerEvent.EndMarkerDue -> endMarkerPlayNs = runCatching { marker?.play() ?: 0L }.getOrDefault(0L)
@@ -629,7 +653,7 @@ class SessionController(private val app: Application) {
                 promptProgress = r.promptProgress(now),
                 progress = r.progress(now),
                 elapsedSec = (r.activeNs(now) / 1_000_000_000L).toInt(),
-                watchGapWarning = watchGapNow(),
+                watchLinkLost = linkSeen && now - tiltAtNs > LINK_LOST_MS * 1_000_000,
                 calibration = if (r.calibrating) it.calibration else null,
             )
         }
@@ -693,6 +717,7 @@ class SessionController(private val app: Application) {
         val endPlayNs = endMarkerPlayNs
         val chirps = synchronized(chirpLock) { chirpLog.toList() }
         val calib = calibration // 다음 세션이 지우기 전에 잡아 둔다
+        val linkRatio = if (sessionTicks > 0) linkTicks.toDouble() / sessionTicks else null
         state.update { it.copy(busy = true, phase = r.phase, calibration = null) }
         scope.launch {
             // 끝 표지음은 낸 지 0.8 s가 지난 뒤 고리 버퍼에서 찾는다. 보통 Finished가 그 시각이지만, tick이 늦어 EndMarkerDue와
@@ -736,8 +761,9 @@ class SessionController(private val app: Application) {
                         startMarker = startMeta,
                         endMarker = endMeta,
                         durationSec = if (started) (endNs - r.startNs) / 1e9 else 0.0,
+                        watchLinkRatio = linkRatio,
                     )
-                    val flags = SessionChecks.flags(handRatio, watchRatio, startMeta.found, endMeta.found)
+                    val flags = SessionChecks.flags(handRatio, watchRatio, startMeta.found, endMeta.found, linkRatio)
                     store.writePrompts(dir, r.records)
                     if (audio != null) {
                         store.writeText(dir, SessionStore.AUDIO_JSON, PhoneAudioJson.write(audio.source, audio.clockSource, audio.clock, audio.frames))
@@ -772,6 +798,7 @@ class SessionController(private val app: Application) {
                         context = meta0.context,
                         rewear = meta0.rewear,
                         calibration = calib,
+                        watchLinkRatio = linkRatio,
                     )
                 }
             }
@@ -822,10 +849,6 @@ class SessionController(private val app: Application) {
      * 마지막 판정 [WARN_BLOCKS]개(30 s)가 내리 "안 들림"이면 참(설계 §6.5 경고). 손을 들면 워치 스피커가 폰 반대쪽을 향해
      * 폰이 처프를 잘 못 듣는 것이 정상이라(2026-10-27 실기기 세션 중 5%), 녹음이 꺼졌다고 볼 만큼 오래 안 들릴 때만 경고한다.
      */
-    private fun watchGapNow(): Boolean = synchronized(chirpLock) {
-        chirpLog.size >= WARN_BLOCKS && chirpLog.takeLast(WARN_BLOCKS).all { it.second == ChirpHeard.NONE }
-    }
-
     /** "안 들림" 판정이 [GAP_BLOCKS]개 이상 이어진 구간을 [시작 ns, 끝 ns]로. 판정 하나는 그 시각까지의 0.5 s다. */
     private fun watchGaps(chirps: List<Pair<Long, ChirpHeard>>): List<LongArray> {
         val gaps = mutableListOf<LongArray>()
@@ -890,11 +913,12 @@ class SessionController(private val app: Application) {
         const val IDLE_TICK_MS = 250L
         const val HAND_VISIBLE_MS = 500L
         const val GAP_BLOCKS = 2
-        const val WARN_BLOCKS = 60
         const val BLOCK_NS = 500_000_000L
         const val OK = "ok"
         const val SKIP = "skip"
         const val CHECKS_BOTH = "hand+forearm"
         const val CHECKS_HAND = "hand"
+        const val LINK_LOST_MS = 10_000L
+        const val TAG = "HandSonar"
     }
 }

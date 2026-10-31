@@ -20,6 +20,8 @@ data class SessionSummary(
     val flags: List<String>,
     val handRatio: Double?,
     val watchRatio: Double?,
+    /** 워치 기울기를 받고 있던 시간 비율(meta.json `stats.watchLinkRatio`). 이 칸 전 세션은 null. */
+    val watchLinkRatio: Double? = null,
     val startMarker: Boolean?,
     val endMarker: Boolean?,
     val cancelled: Boolean,
@@ -105,6 +107,7 @@ class SessionStore(context: Context) {
             flags = flags,
             handRatio = stats?.optDouble("handRatio"),
             watchRatio = stats?.optDouble("watchHeardRatio"),
+            watchLinkRatio = stats?.optDouble("watchLinkRatio")?.takeUnless { it.isNaN() },
             startMarker = markers?.optJSONObject("start")?.optBoolean("found"),
             endMarker = markers?.optJSONObject("end")?.optBoolean("found"),
             cancelled = o.optBoolean("cancelled", false),

@@ -71,7 +71,7 @@ class SessionMetaTest {
             json.contains(
                 "\"stats\":{\"frames\":6000,\"handRatio\":0.95,\"watchHeardRatio\":1.0,\"watchGaps\":[[1,2]]," +
                     "\"markers\":{\"start\":{\"found\":true,\"playNs\":5,\"micFrame\":10.5,\"elapsedNs\":7,\"ratio\":20.0},\"end\":null}," +
-                    "\"durationSec\":218.5}",
+                    "\"durationSec\":218.5,\"watchLinkRatio\":null}",
             ),
             json,
         )
