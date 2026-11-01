@@ -265,6 +265,30 @@ class SessionFolderTest(unittest.TestCase):
             np.testing.assert_allclose(normed["x"][:, 0], dataset.stack_windows([(up_n, False)], normed["row"])[:, 0], atol=1e-5)
             np.testing.assert_allclose(normed["x"][:, 2], dataset.stack_windows([(upd_n, True)], normed["row"])[:, 0], atol=1e-5)
 
+    def test_phase_channels_need_phase_profiles_and_follow_the_base_channels(self):
+        with tempfile.TemporaryDirectory() as data:
+            raw = write_session(data)
+            out = os.path.join(data, "processed", NAME)
+            ds, lines = dataset.build(data, channels="phase")
+            self.assertIsNone(ds)  # profiles.py --phase 전
+            self.assertTrue(any("--phase" in line for line in lines), "\n".join(lines))
+            rng = np.random.default_rng(5)
+            files = {"dphase_profiles.npy": rng.uniform(-1, 1, size=(600, raw.shape[1] - 1)), "dgain_profiles.npy": rng.normal(0, 0.1, size=(600, raw.shape[1] - 1))}
+            for f, a in files.items():
+                np.save(os.path.join(out, f), a.astype(np.float32))
+            rz = dict(np.load(os.path.join(out, "rows.npz"), allow_pickle=False))
+            np.savez(os.path.join(out, "rows.npz"), **{**rz, "phase": np.array(True)})
+            write_sync(data, LAG_MS)
+            self.assertTrue(pairs.run(data, NAME)[1])
+            base, _ = dataset.build(data)
+            phase, lines = dataset.build(data, channels="phase")
+            self.assertIsNotNone(phase, "\n".join(lines))
+            self.assertEqual(4, phase["x"].shape[1])
+            np.testing.assert_allclose(phase["x"][:, :2], base["x"], atol=1e-6)  # 원본·차분은 그대로
+            want = dataset.stack_windows([(files["dphase_profiles.npy"].astype(np.float32), True), (files["dgain_profiles.npy"].astype(np.float32), True)],
+                                         phase["row"])
+            np.testing.assert_allclose(phase["x"][:, 2:], want, atol=1e-5)  # 위상·세기 변화는 차분처럼 앞 줄 → 이 줄 변화
+
     def test_row_normalized_scales_rows_to_the_median_sum_and_leaves_empty_rows(self):
         raw = np.array([[1.0, -2.0, 0.0, 3.0], [1.0, 2.0, 0.0, -1.0]])  # 줄(열)마다 |값| 합 2 · 4 · 0 · 4, 0이 아닌 합의 중앙값 4
         norm, diff = dataset.row_normalized(raw)

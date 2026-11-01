@@ -119,7 +119,7 @@ handsonar.keyPassword=android
 1. `python -I tools/pull.py` — 폰의 세션과 폰이 받은 워치 녹음, 워치 녹음을 adb로 받습니다. 폰을 먼저 받고(USB라 빠름), 워치에서는 폰에 없거나 크기가 다른 파일만 받습니다. 워치가 없어도 됩니다. 파일마다 받고, `rec.json`·`meta.json`은 그 폴더의 다른 파일을 다 받은 뒤에 받습니다(조각이 빠진 사본이 처리에 들어가지 않게). 기기는 모델(워치 SM-L320, 폰 SM-F971N)로 찾고, `--watch`·`--phone`으로 serial을 줄 수 있습니다. adb를 쓸 수 없는 PC는 폰의 "내보내기" zip을 `hand-sonar-data`에 풉니다.
    - 점검: `python -I tools/check_recording.py <녹음 폴더>`(조각·녹음 시각·재생 끊김), `python -I tools/check_sensors.py <녹음 또는 세션 폴더>`(센서의 실제 표본률·받은 시각 − 이벤트 시각·빈틈과 시계 판정, 녹음 볼륨과 외부 출력·되돌리기, 세션 정보). 센서 CSV는 `hs_io.read_sensors`로 읽고, 맞춤에 쓸 시각은 `SensorLog.ns(종류)`입니다: 기기마다 연속 센서의 받은 시각 − 이벤트 시각 1% 값이 −5–50 ms면 이벤트 시각을 그대로, 아니면 그만큼 옮겨 씁니다(바뀔 때만 내는 밝기는 판정에서 뺍니다).
 2. `python -I tools/align.py` — 폰 표지음으로 워치 샘플 번호와 폰 시각을 맞춥니다(`align.json`).
-3. `python -I tools/profiles.py` — 공개 데이터(WatchHand)와 같은 처리로 에코 프로파일을 만듭니다(`profiles.npy`, `diff_profiles.npy`, `rows.npz`).
+3. `python -I tools/profiles.py` — 공개 데이터(WatchHand)와 같은 처리로 에코 프로파일을 만듭니다(`profiles.npy`, `diff_profiles.npy`, `rows.npz`). `--phase`면 칸별 위상·세기 변화(`dphase_profiles.npy`, `dgain_profiles.npy`)도 씁니다(시험 처리, 아래 입력 채널).
 4. `python -I tools/verify_sync.py` — 카메라 관절 속도와 손 거리 소리 세기로 남은 지연을 잽니다(`sync.json`, `sync.png`). 지연이 1프레임(33 ms) 밖이거나 상관 봉우리가 문턱(0.1) 아래면 맞춤을 확인하지 못한 세션으로 적고 끝 코드 1로 끝납니다.
 5. `python -I tools/pairs.py` — 카메라 프레임마다 프로파일 줄을 짝짓습니다(`pairs.csv`). 지연이 1프레임 안이고 상관이 문턱 이상인 세션만, 그리고 `sync.json`이 지금의 `align.json`·`rows.npz`·`landmarks.csv`에서 잰 것일 때만 짝짓습니다. 아니면 `pairs.csv`를 쓰지 않고(옛 것은 `pairs.stale.csv`로 바꿈) 끝 코드 1로 끝납니다.
    - 신호 잣대: `python -I tools/signal_check.py [세션 …]` — 학습 없이 녹음 신호를 거칠게 봅니다(`signal.json`).
@@ -139,7 +139,9 @@ handsonar.keyPassword=android
      - 설치(처음 한 번, 저장소 밖 `../hamer`): `git clone https://github.com/geopavlakos/hamer ../hamer`, 그다음 `python -I tools/hamer_keypoints.py --setup --mano <MANO_RIGHT.pkl>`. 모델 묶음 6.04 GB를 받으면서 체크포인트 2.69 GB와 설정만 꺼내고, MANO 오른손을 chumpy 없는 파일로 바꿔 둡니다.
      - 추가 패키지: `smplx==0.1.28`, `yacs`, `einops`, `pytorch-lightning`, `webdataset`. 렌더러는 쓰지 않습니다.
      - 실행: `python -I tools/hamer_keypoints.py [세션 …]`(GPU, 세션당 약 40초). 영상에 얼굴이 찍혀 있어 PC 안에서만 돌립니다.
-   - 입력 채널 `--channels base|split|all`: 기본 base는 한 주기 원본·차분 2채널입니다. split(오름·내림 원본·차분 4채널)과 all(6채널)은 삼각 녹음을 `profiles.py --split`으로 처리한 세션만 씁니다(시험 처리, 위 처프 모양).
+   - 입력 채널 `--channels base|split|all|phase`: 기본 base는 한 주기 원본·차분 2채널입니다. split(오름·내림 원본·차분 4채널)과 all(6채널)은 삼각 녹음을 `profiles.py --split`으로 처리한 세션만 씁니다(시험 처리, 위 처프 모양).
+     - phase는 원본·차분에 칸별 위상 변화·세기 변화(모든 칸이 함께 바뀌는 공통 변화를 뺌)를 더한 4채널이고, `profiles.py --phase`로 처리한 세션만 씁니다. 위상 변화는 경로 1 mm에 0.36 rad 돌아 mm 아래 움직임과 방향을 담습니다.
+     - 톱니 두 세션(HaMeR 정답, `--head bins`, 씨앗값 3개)에서 평균 자세 대비 비가 0.651에서 0.699로 나빠졌습니다. 손가락 반응 대비가 세기 차분의 1/3–1/2이었습니다. 그래서 기본은 base입니다.
    - 줄 단위 정규화 `--row-norm`: 원본 프로파일의 줄(처프 하나, 12.5 ms)마다 600칸 |값| 합으로 나누고 차분을 다시 냅니다. 워치8 녹음은 받은 소리 전체가 줄마다 약 0.3%씩 함께 흔들려(공개 0.13%) 손이 멈춰도 손 자리 칸이 바뀌는데, 이 몫을 없앱니다. 속도–세기 상관은 0.30–0.35에서 0.46–0.50으로 오르고, 세 세션 블록 학습(씨앗값 3개)의 평균 자세 대비 비는 평균 0.964에서 0.910으로 조금 나아졌습니다(씨앗값 사이 흩어짐과 비슷한 크기). 기본은 끔입니다.
    - 손가락 정답 `--gt hamer`: 손가락 목표도 HaMeR 3D로 만듭니다(`hamer.npz`가 있는 세션만, 프레임 거르기와 L은 MediaPipe 그대로). 기본 `mediapipe`는 논문과 같은 정답이라 논문 수치(MPJPE 7.87 mm)와 직접 견줄 수 있습니다.
      - 11세션에서 견주면 HaMeR가 어느 손가락이 굽었는지는 조금 더 잘 가르고(AUC 0.946–0.963 대 0.929–0.960), 굽힘 크기는 1.4–1.8배 크게 읽었습니다. 손가락도 카메라 쪽으로 굽어, MediaPipe가 깊이를 눌러 읽는 것과 맞습니다.

@@ -139,6 +139,51 @@ class ProfilesTest(unittest.TestCase):
         self.assertLess((up - 350) * (down - 350), 0)  # 제자리(칸 350)를 사이에 두고 반대쪽
         self.assertLessEqual(abs(full - 350), 2)
 
+    def test_motion_channels_turn_with_a_moving_reflector_and_stay_still_elsewhere(self):
+        # 반사체가 줄마다 0.1샘플씩 멀어지면(경로가 길어짐) 그 칸의 위상 변화가 +, 다가오면 −. 멈춘 메아리 칸(450)은 0 가까이
+        tx = profiles.tx_template("none", 0.5)
+        m = np.arange(N, dtype=np.float64)
+
+        def recording(step):
+            rows = [np.roll(tx, 7) + 0.3 * np.roll(tx, 157)
+                    + 0.3 * 0.5 * 32767 * np.sin(profiles.tx_phase("saw", np.mod(m - (57 + step * r), N))) for r in range(24)]
+            return np.concatenate(rows)
+
+        means, still = {}, {}
+        for step in (0.1, -0.1):
+            p = profiles.compute(recording(step), tx, phase=True)
+            dphase, dgain = p.motion
+            self.assertEqual(p.diff.shape, dphase.shape)
+            self.assertEqual(p.diff.shape, dgain.shape)
+            rows = slice(3, 20)
+            means[step] = float(dphase[352:363, rows].mean())
+            still[step] = float(np.abs(dphase[445:456, rows]).mean())  # 멈춘 메아리(움직이는 메아리가 공통 변화 기준을 조금 끌어 0은 아니다)
+        self.assertGreater(means[0.1], 0.2)  # 0.1샘플 = 반송파 약 19.5 kHz에서 0.255 rad
+        self.assertLess(means[-0.1], -0.2)
+        self.assertLess(max(still.values()), 0.15 * min(abs(v) for v in means.values()))
+
+    def test_motion_channels_remove_changes_shared_by_every_bin(self):
+        # 녹음 전체가 함께 커지고 작아지거나 조금씩 밀리면(공통 변화) 칸별 위상·세기 변화는 남지 않는다
+        tx = profiles.tx_template("none", 0.5)
+        m = np.arange(N, dtype=np.float64)
+        rng = np.random.default_rng(3)
+        rows = []
+        for r in range(24):
+            shift, gain = rng.uniform(-0.15, 0.15), rng.uniform(0.9, 1.1)
+            row = sum(g * np.sin(profiles.tx_phase("saw", np.mod(m - d - shift, N))) for d, g in ((7, 1.0), (57, 0.3), (157, 0.3)))
+            rows.append(gain * 0.5 * 32767 * row)
+        x = np.concatenate(rows)
+        p = profiles.compute(x, tx, phase=True)
+        dphase, dgain = p.motion
+        hand = slice(301, 361)
+        # 공통 변화를 빼지 않은 위상 변화와 견준다: 3줄 중앙값을 걸지 않은 상관을 따로 낸다(직접 경로가 칸 7이라 옮기기 전 칸 8–67 = 손 자리)
+        corr = np.fft.irfft(np.fft.rfft(sosfiltfilt(profiles.SOS, x).reshape(-1, N), axis=1) * np.conj(np.fft.rfft(tx)), n=N, axis=1)
+        h = hilbert(corr, axis=1)
+        plain = np.abs(np.angle(h[1:, 8:68] * np.conj(h[:-1, 8:68])))[3:20]
+        self.assertGreater(float(np.median(plain)), 0.1)
+        self.assertLess(float(np.median(np.abs(dphase[hand, 3:20]))), 0.1 * float(np.median(plain)))
+        self.assertLess(float(np.median(np.abs(dgain[hand, 3:20]))), 0.03)
+
     def test_tx_spec_reads_the_shape_and_old_recordings_are_saw(self):
         self.assertEqual(("none", 0.5, "saw"), profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5}}))
         self.assertEqual(("none", 0.5, "triangle"), profiles.tx_spec({"tx": {"window": "none", "amplitude": 0.5, "shape": "triangle"}}))

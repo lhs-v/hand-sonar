@@ -27,8 +27,10 @@
   이름(--run 없을 때)과 그림 제목에 붙인다.
 - 줄 단위 정규화(--row-norm, 2026-10-31): 원본 프로파일 줄마다 600칸 |값| 합으로 나누고 차분을 다시 낸 뒤 창을 만든다(dataset 머리말).
   워치8 녹음의 줄 전체 흔들림(약 0.3%)이 손 자리 칸에 남기는 몫을 없앤다. metrics.json rowNorm·model.pt row_norm에 남기고 실행 이름에 붙인다.
-- 입력 채널(--channels, 2026-10-31): base(기본, 한 주기 원본·차분 2채널), split(오름·내림 원본·차분 4채널), all(6채널). split·all은
-  삼각 녹음을 profiles.py --split으로 만든 세션만 쓴다(dataset 머리말). 모델 입력 채널 수는 자료에서 정하고 model.pt in_chans·channels에 남긴다.
+- 입력 채널(--channels, 2026-10-31): base(기본, 한 주기 원본·차분 2채널), split(오름·내림 원본·차분 4채널), all(6채널), phase(원본·차분 +
+  칸별 위상·세기 변화 4채널, 2026-11-01). split·all은 삼각 녹음을 profiles.py --split으로, phase는 profiles.py --phase로 만든 세션만 쓴다
+  (dataset 머리말). 모델 입력 채널 수는 자료에서 정하고 model.pt in_chans·channels에 남긴다. phase는 톱니 두 세션(HaMeR, --head bins,
+  씨앗값 3개)에서 평균 자세 대비 비 0.651 → 0.699로 나빠졌다.
 - 관절 각도 머리(--head, 2026-11-01): coords(기본, 점 60값 직접 회귀 — 논문과 같음), angles(뼈 15개의 굽힘·벌림 30값을 회귀해 순기구학),
   bins(같은 30각을 각도마다 HEAD_BINS칸으로 분류하고 칸 확률의 기댓값으로 순기구학). 손바닥 점 다섯과 뼈 길이는 학습 프레임에서 정해
   고정한다(kinematics 머리말). 손실은 순기구학한 점에 그대로 MSE + 속도 손실이고, bins는 학습 손실에만 --bin-weight × 칸 교차 엔트로피

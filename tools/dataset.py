@@ -32,6 +32,8 @@
 - 입력 채널(channels, 2026-10-31): "base"(기본) = 한 주기 원본·차분 2채널. "split" = 오름 원본·내림 원본·오름 차분·내림 차분 4채널, "all" = 둘을
   합친 6채널. 오름·내림은 삼각 녹음을 profiles.py --split으로 만든 것만 있다(rows.npz split). 한 주기로 맞춰 보면 움직이는 손가락의 도플러 거리
   어긋남이 오름과 내림에서 반대로 생겨 상쇄되는데, 나누면 둘이 따로 남는다. 줄 단위 정규화는 한 주기 원본의 줄 합으로 모든 원본 채널을 나눈다.
+  "phase"(2026-11-01) = 원본·차분·위상 변화·세기 변화 4채널. 위상·세기 변화는 profiles.py --phase로 만든 것만 있다(rows.npz phase, 머리말 9 —
+  공통 변화를 뺀 칸별 변화라 줄 단위 정규화와 상관없다). 차분처럼 줄 i → i+1 변화라 열이 하나 적다(DIFF_LIKE).
 - 나누기(설계 §4). 셋 다 (학습, 검증, 시험) 프레임 번호를 세션·시각 순서로 낸다.
   - session_split(세션 단위): 착용 묶음 통째로 나눈다(계획 6 검토 고침 M1). 착용(wear_episodes): 시각(meta start wallMs) 순으로 meta.json
     rewear가 참인 세션에서 새 착용이 시작해 다음 그런 세션 전까지 간다. 경계에는 자료에 들지 않은 세션(휴지통·끝나지 않음·처리 안 됨)의
@@ -88,9 +90,13 @@ ROLES = ("train", "val", "test")  # block_assign의 역할 번호 0·1·2
 GT_NAMES = {"mediapipe": "MediaPipe", "hamer": "HaMeR"}  # 손가락 정답의 3D(session_data gt) → 보일 이름
 GT_SOURCES = tuple(GT_NAMES)
 CHANNEL_SETS = {"base": ("raw", "diff"), "split": ("up", "down", "up_diff", "down_diff"),
-                "all": ("raw", "diff", "up", "down", "up_diff", "down_diff")}  # 입력 채널 묶음(머리말) — 이름이 diff로 끝나면 차분
+                "all": ("raw", "diff", "up", "down", "up_diff", "down_diff"),
+                "phase": ("raw", "diff", "dphase", "dgain")}  # 입력 채널 묶음(머리말)
+DIFF_LIKE = {"diff", "up_diff", "down_diff", "dphase", "dgain"}  # 줄 i → i+1 변화라 열이 하나 적은 채널(창에서 한 칸 앞 열을 쓴다)
+NEEDS = {"up": "split", "down": "split", "up_diff": "split", "down_diff": "split", "dphase": "phase", "dgain": "phase"}  # rows.npz 표시 = profiles.py 옵션
 CHANNEL_FILES = {"raw": "profiles.npy", "diff": "diff_profiles.npy", "up": "profiles_up.npy", "down": "profiles_down.npy",
-                 "up_diff": "diff_profiles_up.npy", "down_diff": "diff_profiles_down.npy"}
+                 "up_diff": "diff_profiles_up.npy", "down_diff": "diff_profiles_down.npy", "dphase": "dphase_profiles.npy",
+                 "dgain": "dgain_profiles.npy"}
 
 
 def kind_of(class_id, labelled):
@@ -239,13 +245,16 @@ def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe", row_n
                       " 대응표: pairs.py를 다시)"]
     with np.load(os.path.join(out, "rows.npz"), allow_pickle=False) as rz:
         ok = rz["ok"]
-        split = bool(rz["split"]) if "split" in rz.files else False
+        flags = {f: bool(rz[f]) if f in rz.files else False for f in set(NEEDS.values())}
     want = CHANNEL_SETS[channels]
-    if not split and any(c not in ("raw", "diff") for c in want):
+    lacking = {NEEDS[c] for c in want if c in NEEDS and not flags[NEEDS[c]]}
+    if "split" in lacking:
         return None, [f"{name}: 건너뜀(채널 {channels}에는 오름·내림 프로파일이 필요 — 삼각 녹음을 profiles.py --split으로)"]
+    if "phase" in lacking:
+        return None, [f"{name}: 건너뜀(채널 {channels}에는 위상·세기 변화가 필요 — profiles.py --phase로)"]
     arrays = {c: np.load(os.path.join(out, CHANNEL_FILES[c]), mmap_mode="r", allow_pickle=False) for c in sorted(set(want) | {"raw", "diff"})}
     for c, a in arrays.items():
-        if a.shape != (600, len(ok) - c.endswith("diff")):
+        if a.shape != (600, len(ok) - (c in DIFF_LIKE)):
             return None, [f"{name}: 건너뜀({CHANNEL_FILES[c]} {a.shape}와 rows.npz {len(ok)}줄이 맞지 않음 — profiles.py를 다시)"]
     if row_norm:  # 원본을 메모리에 올려 한 주기 원본의 줄 합으로 모든 원본 채널을 나누고 차분을 다시 낸다(창은 아래에서 같은 식으로 자른다)
         gain = row_gain(arrays["raw"])
@@ -301,7 +310,7 @@ def session_data(data, name, bins=BINS, standardized=True, gt="mediapipe", row_n
     lines.append(f"  L(손목–새끼 MCP 중앙값) {length_mm:.1f} mm, 엄지가 손바닥 쪽인 프레임 {palmar:.1%}, 라벨 붙은 프레임 {int((use & labelled).sum())}개"
                  + (", 줄 단위 정규화(줄마다 600칸 |값| 합으로 나눔)" if row_norm else "")
                  + (f", 입력 채널 {channels}({'·'.join(want)})" if channels != "base" else ""))
-    part = {"x": stack_windows([(arrays[c], c.endswith("diff")) for c in want], p["row"][use], bins=bins, standardized=standardized), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
+    part = {"x": stack_windows([(arrays[c], c in DIFF_LIKE) for c in want], p["row"][use], bins=bins, standardized=standardized), "y": y.reshape(-1, 60).astype(np.float32), "frame_ns": p["frameNs"][use],
             "row": p["row"][use], "prompt": p["prompt"][use].astype(np.int32), "class_id": p["classId"][use].astype(np.int16),
             "flag": p["flag"][use], "edge": p["edge"][use] == 1, "labelled": labelled[use], "v9": v9.astype(np.float32),
             "wrist": w["u"][use], "wrist_depth": w["depth"][use], "wrist_ok": w["ok"][use], "wrist_method": w["method"], "wrist_source": w["source"],
