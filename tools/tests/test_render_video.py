@@ -103,6 +103,21 @@ class RenderTest(unittest.TestCase):
         card = D.card_image("제목", "부제", "시험 블록 0", "세션 0–10 s", ["줄 하나", "12.3 mm", "참고"], "1 / 4")
         self.assertEqual(card.shape, (D.CH, D.CW, 3))
 
+    def test_compare_prediction_is_drawn_in_its_own_colour_in_every_panel(self):
+        def count(img, box, colour):
+            x0, y0, w, h = box
+            p = img[y0: y0 + h, x0: x0 + w].astype(int)
+            r, g, b = D.rgb(colour)
+            return int(((np.abs(p[..., 0] - r) < 40) & (np.abs(p[..., 1] - g) < 40) & (np.abs(p[..., 2] - b) < 40)).sum())
+
+        bg = D.static_background("제목", "부제", ("설명 하나", "설명 둘"), 40.0, labels=("새 모델", "기준"))
+        plain = D.render_frame(self.S, bg, 0, self.frame, self.info, None, self.tl)
+        info = dict(self.info, pred2=self.y[0] - 0.05, err2=15.0)
+        both = D.render_frame(self.S, bg, 0, self.frame, info, None, dict(self.tl, err2=np.array([11.0, 12.0, 13.0])))
+        for box in (D.PA, D.PB, D.TP):  # 손 영상 겹쳐 보기 · 3D · 오차 시간 띠
+            self.assertEqual(0, count(plain, box, D.COMPARE), box)
+            self.assertGreater(count(both, box, D.COMPARE), 10, box)
+
     def test_mano_panels_show_the_predicted_mesh_in_blue(self):
         bg = D.static_background("제목", "부제", ("설명 하나", "설명 둘"), 40.0, mano=True)
         verts = joints.with_wrist(self.y[:1])[0] * self.S["L_mm"]  # 관절 21점을 정점으로 쓰는 작은 '메시'(손바닥 삼각형 몇 개)
@@ -176,6 +191,19 @@ class HandSegTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertGreater(alpha[prior].mean(), 0.8 * 255)
         self.assertEqual(int(alpha[:20, :20].max()), 0)
+
+
+class SavedPredictionsTest(unittest.TestCase):
+    def test_sequence_runs_read_their_saved_predictions_for_the_session(self):
+        import tempfile
+        saved = {"session": np.array([0, 0, 1, 1, 1]), "y": np.arange(5 * 60, dtype=np.float32).reshape(5, 60)}
+        pred = saved["y"] + 0.5
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(render_video.saved_predictions(d, saved, 1))  # pred.npy가 없으면(train.py 실행) 다시 예측한다
+            np.save(os.path.join(d, "pred.npy"), pred)
+            p, y = render_video.saved_predictions(d, saved, 1)
+        np.testing.assert_allclose(p, pred[2:].reshape(-1, 20, 3))
+        np.testing.assert_allclose(y, saved["y"][2:].reshape(-1, 20, 3))
 
 
 class PlanTest(unittest.TestCase):

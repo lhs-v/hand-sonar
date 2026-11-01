@@ -146,6 +146,22 @@ def predict_session(data, run, saved, k):
     return pred.reshape(-1, 20, 3).astype(np.float64), part["y"].reshape(-1, 20, 3).astype(np.float64), device
 
 
+def saved_predictions(run, saved, k):
+    """순서 모델 실행(train_seq.py — 덩어리마다 상태를 이어 굴린 예측을 pred.npy로 남김)이면 세션 k의 (예측 (M, 20, 3), 목표 (M, 20, 3)),
+    아니면(train.py 실행) None — 그때는 predict_session으로 창마다 다시 예측한다."""
+    path = os.path.join(run, "pred.npy")
+    if not os.path.exists(path):
+        return None
+    mine = np.asarray(saved["session"]) == k
+    return (np.load(path)[mine].reshape(-1, 20, 3).astype(np.float64), np.asarray(saved["y"])[mine].reshape(-1, 20, 3).astype(np.float64))
+
+
+def run_predictions(data, run, saved, k):
+    """(예측, 목표, 장치 이름): 순서 모델은 저장된 예측, 아니면 predict_session."""
+    got = saved_predictions(run, saved, k)
+    return (*got, "저장된 예측(pred.npy)") if got is not None else predict_session(data, run, saved, k)
+
+
 def video_source(args, data, name, n_rows, meta, dropped):
     """(영상 경로 또는 None, 화면 좌표에 곱할 (폭, 높이), 알릴 줄). --video로 준 영상이 맞지 않으면 ValueError."""
     v = meta.get("video") or {}
@@ -171,12 +187,23 @@ def video_source(args, data, name, n_rows, meta, dropped):
     return path, size, f"영상 {path}({size[0]}×{size[1]}{note})"
 
 
-def prepare(data, run, m, saved, parts, k, frames, size, watch=True):
+def prepare(data, run, m, saved, parts, k, frames, size, watch=True, compare=None):
     """세션 프레임(0…N−1) 기준 자료 S: render_draw 머리말의 칸 + 역할·예측·오차·동작·자르기. 돌려주는 두 번째 값은 장치 이름.
-    watch면 손목 정답이 있을 때 S["palm_to_watch"](프레임마다 손바닥 틀 → 워치 축 회전 (N, 3, 3), 없는 프레임 nan)를 채운다(머리말)."""
+    watch면 손목 정답이 있을 때 S["palm_to_watch"](프레임마다 손바닥 틀 → 워치 축 회전 (N, 3, 3), 없는 프레임 nan)를 채운다(머리말).
+    compare(두 번째 실행 폴더)면 같은 프레임의 그 예측·오차를 S["pred2"]·S["err2"]로 더한다(학습 자료 프레임이 같아야 한다)."""
     name = str(saved["sessions"][k])
     folder = hs_io.session_folder(data, name)
-    pred_ds, y_ds, device = predict_session(data, run, saved, k)
+    pred_ds, y_ds, device = run_predictions(data, run, saved, k)
+    pred2_ds = None
+    if compare:
+        saved2 = dataset.load(os.path.join(compare, "dataset.npz"))
+        names2 = [str(s) for s in saved2["sessions"]]
+        if name not in names2:
+            raise ValueError(f"비교 실행 {compare}의 자료에 세션 {name}이 없음")
+        k2 = names2.index(name)
+        if not np.array_equal(saved2["frame_ns"][saved2["session"] == k2], saved["frame_ns"][saved["session"] == k]):
+            raise ValueError(f"비교 실행 {compare}의 세션 {name} 학습 자료 프레임이 주 실행과 다름")
+        pred2_ds, _, _ = run_predictions(data, compare, saved2, k2)
     marks = hs_io.read_landmarks(folder)
     hand = hs_io.read_session(folder).hand
     n = len(marks.frame_ns)
@@ -215,6 +242,10 @@ def prepare(data, run, m, saved, parts, k, frames, size, watch=True):
     S["pred"][pos[show]] = pred_ds[show]
     S["err"][pos[show]] = joints.frame_errors(pred_ds[show], y_ds[show]) * L
     S["mean_err"][pos[show]] = joints.frame_errors(mean[None], y_ds[show]) * L
+    if pred2_ds is not None:
+        S["pred2"], S["err2"] = np.full((n, 20, 3), np.nan), np.full(n, np.nan)
+        S["pred2"][pos[show]] = pred2_ds[show]
+        S["err2"][pos[show]] = joints.frame_errors(pred2_ds[show], y_ds[show]) * L
     S["t"] = (marks.frame_ns - int(saved["frame_ns"][mine].min())) / 1e9  # 학습 자료 첫 프레임부터(블록 나누기와 같은 기준)
     if m["mode"] == "blocks":
         block = dataset.block_assign(saved["frame_ns"], saved["session"], offset=int(m["split"].get("offset", 0)))[0][mine]
@@ -305,9 +336,13 @@ def frame_info(S, n, mode, seg, i, total):
     tag, color, note = tag_of(S, n, mode)
     has = bool(np.isfinite(S["err"][n]))
     a, b = seg["range"]
-    return {"pred": S["pred"][n] if has else None, "err": S["err"][n], "prompt": name, "kind": kind, "edge": edge, "time": float(S["t"][n]), "tag": tag,
-            "tag_color": color, "tag_note": note, "seg_text": f"{seg['title']}  ({round(a):d}–{round(b):d} s)  {i + 1}/{total}",
-            "meanpose": S["mean_err"][n] if has else np.nan}
+    out = {"pred": S["pred"][n] if has else None, "err": S["err"][n], "prompt": name, "kind": kind, "edge": edge, "time": float(S["t"][n]), "tag": tag,
+           "tag_color": color, "tag_note": note, "seg_text": f"{seg['title']}  ({round(a):d}–{round(b):d} s)  {i + 1}/{total}",
+           "meanpose": S["mean_err"][n] if has else np.nan}
+    if "err2" in S:
+        has2 = bool(np.isfinite(S["err2"][n]))
+        out.update(pred2=S["pred2"][n] if has2 else None, err2=S["err2"][n])
+    return out
 
 
 def timeline(S, seg, n):
@@ -319,7 +354,8 @@ def timeline(S, seg, n):
     else:
         a = min(max(now - TL_WINDOW_SEC / 2, t0), t1 - TL_WINDOW_SEC)
         b = a + TL_WINDOW_SEC
-    return {"t": S["t"][fr], "err": S["err"][fr], "mean": S["mean_err"][fr], "role": S["role"][fr], "a": a, "b": b, "now": now}
+    return {"t": S["t"][fr], "err": S["err"][fr], "mean": S["mean_err"][fr], "role": S["role"][fr], "a": a, "b": b, "now": now,
+            "err2": S["err2"][fr] if "err2" in S else None}
 
 
 def card(S, title, subtitle, seg, i, total):
@@ -332,7 +368,8 @@ def card(S, title, subtitle, seg, i, total):
         first += f"  ·  주요 동작: {', '.join(kinds)}"
     elif S["prompts"]:
         first += "  ·  라벨 붙은 동작 없음"
-    lines = [first] + ([f"이 구간 평균 MPJPE  {np.mean(S['err'][has]):.1f} mm", f"참고: 학습 평균 자세 상수로 찍으면  {np.mean(S['mean_err'][has]):.1f} mm"]
+    versus = f"  ·  비교 {np.nanmean(S['err2'][has]):.1f} mm" if "err2" in S and len(has) and np.isfinite(S["err2"][has]).any() else ""
+    lines = [first] + ([f"이 구간 평균 MPJPE  {np.mean(S['err'][has]):.1f} mm{versus}", f"참고: 학습 평균 자세 상수로 찍으면  {np.mean(S['mean_err'][has]):.1f} mm"]
                        if len(has) else ["이 구간에는 예측을 그린 프레임이 없음"])
     return D.card_image(title, subtitle, seg["title"], f"세션 {round(a):d}–{round(b):d} s", lines, f"{i + 1} / {total}")
 
@@ -392,6 +429,9 @@ def main():
     parser.add_argument("--seg", action="store_true", help="왼쪽 패널에서 손만 남긴다(GrabCut)")
     parser.add_argument("--mano", metavar="MANO_LEFT.pkl", help="3D 뼈대 대신 정답·예측 MANO 메시(모델 파일 또는 mano_v1_2를 푼 폴더 — 저장소 밖)")
     parser.add_argument("--palm-frame", action="store_true", help="3D를 손바닥 틀로(손목 꺾임이 안 보이는 예전 판). 기본은 손목 정답이 있으면 워치 축")
+    parser.add_argument("--compare", metavar="실행 폴더", help="두 번째 실행의 예측도 같은 화면에 붉은 주황으로(같은 학습 자료 프레임이어야 함)")
+    parser.add_argument("--label", help="비교 영상에서 주 실행의 이름(없으면 실행 폴더 이름)")
+    parser.add_argument("--compare-label", help="비교 영상에서 두 번째 실행의 이름(없으면 실행 폴더 이름)")
     parser.add_argument("--check", type=int, metavar="N", help="영상 대신 고르게 뽑은 N장과 첫 제목 카드를 PNG로")
     parser.add_argument("--limit", type=int, metavar="N", help="앞 N장만 그린다")
     parser.add_argument("--fps", type=float, help="출력 초당 장 수(없으면 카메라 프레임 간격 중앙값)")
@@ -415,7 +455,9 @@ def main():
         video, size, how = video_source(args, args.data, name, len(marks.frame_ns), meta, marks.dropped)
         if args.seg and video is None:
             raise ValueError("손만 보이기(--seg)에는 영상이 필요함")
-        S, device = prepare(args.data, args.run, m, saved, parts, k, args.frames, size, watch=not args.palm_frame)
+        if args.compare and args.mano:
+            raise ValueError("--compare는 3D 뼈대 판에서만(--mano와 함께 쓰지 않는다)")
+        S, device = prepare(args.data, args.run, m, saved, parts, k, args.frames, size, watch=not args.palm_frame, compare=args.compare)
         segs = plan(S, m["mode"], args.frames)
     except (ValueError, FileNotFoundError) as e:
         print(f"멈춤: {e}")
@@ -430,9 +472,17 @@ def main():
                 " · 시간은 학습 자료 첫 프레임부터")
     watch = S["palm_to_watch"] is not None and not args.mano  # MANO 판은 메시를 카메라에서 본 방향으로 그린다
     print(f"  3D: {'MANO 메시(카메라에서 본 방향)' if args.mano else '워치 축(손목 꺾임이 보임)' if watch else '손바닥 틀'}")
-    bg = D.static_background(title, subtitle, (NOTE_VIDEO.format(gt=gt_name) if video else NOTE_NO_VIDEO,
-                                               NOTE_MANO if args.mano else note_3d(S["L_mm"], watch)),
-                             S["ymax"], video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano), gt_name=gt_name, watch=watch)
+    labels, note2 = None, NOTE_MANO if args.mano else note_3d(S["L_mm"], watch)
+    if args.compare:
+        compare_name = os.path.basename(os.path.normpath(args.compare))
+        labels = (args.label or run_name, args.compare_label or compare_name)
+        subtitle = f"파랑 {labels[0]}({run_name}) · 붉은 주황 {labels[1]}({compare_name}) · 세션 {name} · 정답 = {gt_name}"
+        note2 = (f"{'워치 축: 손목이 원점, 회색 = 팔뚝·워치(대략). ' if watch else ''}검정 = 정답, 파랑 = {labels[0]}, 붉은 주황 = {labels[1]}. "
+                 f"두 모델 모두 손 방향은 정답, 손가락 모양만 예측. 단위 손 × 세션 L {S['L_mm']:.1f} mm.")
+        S["mean_mm"] = None  # 뼈대가 셋이라 학습 평균 자세는 3D에 그리지 않는다(시간 띠의 회색 선은 남김)
+        print(f"  비교: {labels[1]}({compare_name}) — 붉은 주황")
+    bg = D.static_background(title, subtitle, (NOTE_VIDEO.format(gt=gt_name) if video else NOTE_NO_VIDEO, note2),
+                             S["ymax"], video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano), gt_name=gt_name, watch=watch, labels=labels)
     order = [(i, int(f)) for i, s in enumerate(segs) for f in s["frames"]]
     if args.limit:
         order = order[: args.limit]
@@ -454,6 +504,8 @@ def main():
         sizes = [hand_seg.hand_size(px) for px in S["img_px"] if np.isfinite(px).all()]
         floor = hand_seg.SIZE_FLOOR * float(np.median(sizes)) if sizes else 0.0
     stem = f"{run_name}_{name}_{args.frames}{'_seg' if args.seg else ''}{'_mano' if args.mano else ''}"
+    if args.compare:
+        stem += f"_vs_{os.path.basename(os.path.normpath(args.compare))}"
     os.makedirs(out, exist_ok=True)
     check_dir = os.path.join(out, stem + "-check")
     if args.check:

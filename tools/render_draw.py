@@ -21,6 +21,7 @@ CW, CH = 960, 680  # 그림 크기(짝수: yuv420p)
 SURFACE, INK, INK2, MUTED, GRID, BASE, BLUE = "#fcfcfb", "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#2a78d6"
 GREEN, ORANGE, PURPLE, GRAY, CARD = "#2a9d8f", "#e3a33b", "#6b4fb0", "#898781", "#f1f0ea"
 ROLE_COLORS = (GREEN, ORANGE, PURPLE)  # 학습 · 검증 · 시험(dataset.ROLES 순서) — 꼬리표와 시간 띠 아래 역할 띠
+COMPARE = "#d9542b"  # 비교 영상(render_video --compare)의 두 번째 모델(검증 역할 띠의 주황과 갈리게 붉은 쪽)
 HAND_BG = (20, 20, 20)  # 손 패널의 빈 바탕(BGR): 영상 없음·손만 보이는 판의 배경
 FONTS = (  # (보통, 굵게)
     (r"C:\Windows\Fonts\malgun.ttf", r"C:\Windows\Fonts\malgunbd.ttf"),
@@ -259,16 +260,17 @@ def draw_forearm(d, panel, h0, view):
         rect(-WATCH_Z[1], -WATCH_Z[0], WATCH_X[0], WATCH_X[1], rgb("#9b9a95"))
 
 
-def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False, gt_name="MediaPipe", watch=False):
+def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False, gt_name="MediaPipe", watch=False, labels=None):
     """영상 내내 같은 배경(제목·범례·패널 틀·격자·평균 자세·설명·띠 바탕)을 한 번 그린다. RGB numpy. mano면 3D 뼈대 대신 메시 패널 둘.
     gt_name은 범례·메시 제목에 적을 정답 3D 이름(dataset.GT_NAMES). watch면 3D 패널이 워치 축 판(팔뚝·워치를 바탕에 그리고, 학습 평균
-    자세는 프레임마다 그 프레임의 손 방향으로 render_frame이 그린다)."""
+    자세는 프레임마다 그 프레임의 손 방향으로 render_frame이 그린다). labels = (주 모델 이름, 비교 모델 이름)이면 비교 영상의 범례(파랑 · COMPARE)."""
     mean_static = None if (mano or watch) else mean_mm  # 메시 판에는 3D 뼈대 패널이 없다
     img = Image.new("RGB", (CW, CH), rgb(SURFACE))
     d = ImageDraw.Draw(img)
     text(d, (16, 24), title, 22, INK, bold=True)
     text(d, (16, 50), subtitle, 13, INK2)
-    entries = ((f"{gt_name} 정답", "gt"), ("FastViT 예측", "pred")) + ((("학습 평균 자세", "mean"),) if mean_mm is not None and not mano else ())
+    preds = ((labels[0], "pred"), (labels[1], "compare")) if labels else (("FastViT 예측", "pred"),)
+    entries = ((f"{gt_name} 정답", "gt"),) + preds + ((("학습 평균 자세", "mean"),) if mean_mm is not None and not mano else ())
     widths = [tlen(d, label, 13) + 28 + 10 for label, _ in entries]
     lx = CW - 16 - sum(widths) - 20 * (len(entries) - 1)
     for (label, kind), wd in zip(entries, widths):
@@ -276,7 +278,8 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, ma
             d.line([(lx, 24), (lx + 28, 24)], fill=rgb(INK), width=4)
             d.line([(lx + 1, 24), (lx + 14, 24)], fill=(255, 255, 255), width=2)
         else:
-            d.line([(lx, 24), (lx + 28, 24)], fill=rgb(BLUE if kind == "pred" else BASE), width=4 if kind == "pred" else 2)
+            colour = {"pred": BLUE, "compare": COMPARE}.get(kind, BASE)
+            d.line([(lx, 24), (lx + 28, 24)], fill=rgb(colour), width=4 if kind != "mean" else 2)
         text(d, (lx + 38, 24), label, 13, INK2)
         lx += wd + 20
     text(d, (PA[0], 72), "손 영상 위 겹쳐 보기(근사)" if video else "화면 좌표 뼈대(영상 없음, 근사)", 14, INK, bold=True)
@@ -315,8 +318,8 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, ma
         d.line([(TP[0], py), (TP[0] + TP[2], py)], fill=rgb(GRID), width=1)
         text(d, (TP[0] - 6, py), f"{v:g}", 10, MUTED, anchor="rm")
     lx = x + w - 16
-    for label, color, kind in (("시험", PURPLE, "band"), ("검증", ORANGE, "band"), ("학습", GREEN, "band"),
-                               ("평균 자세 상수", MUTED, "line"), ("FastViT", BLUE, "line")):
+    lines = ((labels[1], COMPARE, "line"), (labels[0], BLUE, "line")) if labels else (("FastViT", BLUE, "line"),)
+    for label, color, kind in (("시험", PURPLE, "band"), ("검증", ORANGE, "band"), ("학습", GREEN, "band"), ("평균 자세 상수", MUTED, "line")) + lines:
         lx -= tlen(d, label, 11)
         text(d, (lx, y + 14), label, 11, INK2)
         if kind == "line":
@@ -333,11 +336,13 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, ma
     return canvas
 
 
-def draw_overlay(crop2x, gt_pts, pred_pts):
+def draw_overlay(crop2x, gt_pts, pred_pts, pred2_pts=None):
     """2배 크기 손 영상(BGR) 위에: 예측은 굵은 파랑 띠를 먼저, 정답은 검은 윤곽의 가는 흰 선을 그 위에 얹는다. 둘이 겹치면 파랑 띠 한가운데
-    흰 선이 보이고, 어긋나면 흰 선이 파랑 띠 밖으로 나온다."""
+    흰 선이 보이고, 어긋나면 흰 선이 파랑 띠 밖으로 나온다. pred2_pts(비교 모델)는 파랑 위에 가는 COMPARE 띠로."""
     if pred_pts is not None:
         draw_simple(crop2x, pred_pts, bgr(BLUE), 8, 4.8)
+    if pred2_pts is not None:
+        draw_simple(crop2x, pred2_pts, bgr(COMPARE), 4, 3.2)
     for i, j in EDGES:
         line(crop2x, gt_pts[i], gt_pts[j], (14, 14, 14), 6)
     for k in range(21):
@@ -371,7 +376,8 @@ def draw_timeline(canvas, tl, ymax):
     span = max(b - a, 1e-9)
     sel = np.flatnonzero((t >= a) & (t <= b))
     xs = TP[0] + (t[sel] - a) / span * TP[2]
-    for values, color, th in ((tl["mean"], rgb(MUTED), 1), (tl["err"], rgb(BLUE), 2)):
+    curves = ((tl["mean"], rgb(MUTED), 1),) + (((tl["err2"], rgb(COMPARE), 2),) if tl.get("err2") is not None else ()) + ((tl["err"], rgb(BLUE), 2),)
+    for values, color, th in curves:
         v = values[sel]
         ok = np.isfinite(v)
         breaks = np.r_[False, (np.diff(t[sel]) > TL_GAP_SEC)]
@@ -448,16 +454,19 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
         crop2 = (crop2.astype(np.float32) * 0.92).astype(np.uint8)  # 흰 선이 더 보이게 살짝 어둡게
         if seg is not None:
             crop2 = composite_hand(crop2, seg["alpha"])
+    pred2 = info.get("pred2")  # 비교 모델(render_video --compare)
     if has_hand and not hidden:
         gt_img = S["img_px"][n] @ M[:, :2].T + M[:, 2]
         pred_img = None if info["pred"] is None else pred_to_image(S, n, info["pred"]) @ M[:, :2].T + M[:, 2]
-        draw_overlay(crop2, gt_img, pred_img)
+        pred2_img = None if pred2 is None else pred_to_image(S, n, pred2) @ M[:, :2].T + M[:, 2]
+        draw_overlay(crop2, gt_img, pred_img, pred2_img)
     crop = cv2.resize(crop2, (PA[2], PA[3]), interpolation=cv2.INTER_AREA)
     canvas[PA[1]: PA[1] + PA[3], PA[0]: PA[0] + PA[2]] = crop[:, :, ::-1]
     cv2.rectangle(canvas, (PA[0], PA[1]), (PA[0] + PA[2] - 1, PA[1] + PA[3] - 1), rgb(BASE), 1)
     L = S["L_mm"]
     gt_mm = S["unit"][n] * L  # (21, 3) 손목(원점) 포함
     pr_mm = None if info["pred"] is None else np.vstack([np.zeros((1, 3)), info["pred"] * L])
+    pr2_mm = None if pred2 is None else np.vstack([np.zeros((1, 3)), pred2 * L])
     mean_mm = None
     watch = mano is None and S.get("palm_to_watch") is not None  # MANO 판은 메시를 카메라에서 본 방향으로 그린다
     no_wrist = False
@@ -466,10 +475,11 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
         if np.isfinite(R).all():
             gt_mm = gt_mm @ R.T
             pr_mm = None if pr_mm is None else pr_mm @ R.T
+            pr2_mm = None if pr2_mm is None else pr2_mm @ R.T
             mean_mm = None if S.get("mean_mm") is None else S["mean_mm"] @ R.T
         else:
             no_wrist = True
-            gt_mm, pr_mm = np.full_like(gt_mm, np.nan), None
+            gt_mm, pr_mm, pr2_mm = np.full_like(gt_mm, np.nan), None, None
     gt_ok = bool(np.isfinite(gt_mm).all())
     if mano is not None:
         for panel, key, color in ((PB_M, "gt", GT_MESH), (PC_M, "pred", PRED_MESH)):
@@ -480,9 +490,11 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
         if mean_mm is not None:  # 워치 축 판: 학습 평균 자세도 그 프레임의 손 방향으로
             draw_simple(sub, panel_points(mean_mm, panel, h0, view, k3, v0), rgb(BASE), 1, 1.8)
         pg = panel_points(gt_mm, panel, h0, view, k3, v0) if gt_ok else None
+        if pr2_mm is not None:  # 비교 모델: 관절별 오차 선은 생략(뼈대가 셋이라)
+            draw_simple(sub, panel_points(pr2_mm, panel, h0, view, k3, v0), rgb(COMPARE), 2, 2.4)
         if pr_mm is not None:
             pp = panel_points(pr_mm, panel, h0, view, k3, v0)
-            if pg is not None:
+            if pg is not None and pr2_mm is None:
                 for k in range(1, 21):  # 관절별 오차 선(연한 파랑)
                     line(sub, pg[k], pp[k], (170, 196, 232), 1)
             draw_simple(sub, pp, rgb(BLUE), 2, 2.6)
@@ -522,7 +534,9 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
     mx = x + 400
     text(d, (mx, y + 52), "MPJPE", 12, MUTED)
     if np.isfinite(info["err"]):
-        text(d, (mx + 52, y + 52), f"{info['err']:.1f} mm", 26, INK, bold=True)
+        text(d, (mx + 52, y + 52), f"{info['err']:.1f} mm", 26, BLUE if pred2 is not None else INK, bold=True)
+        if info.get("err2") is not None and np.isfinite(info["err2"]):
+            text(d, (mx + 52 + tlen(d, f"{info['err']:.1f} mm", 26, True) + 18, y + 54), f"{info['err2']:.1f} mm", 20, COMPARE, bold=True)
     else:
         text(d, (mx + 52, y + 52), "— (예측 없음, 정답만 표시)", 14, MUTED)
     if info.get("meanpose") is not None and np.isfinite(info["meanpose"]):

@@ -159,6 +159,26 @@ class AugmentTest(unittest.TestCase):
             np.testing.assert_array_equal(out[torch.as_tensor(untouched)].numpy(), x[torch.as_tensor(idx[untouched])].numpy())
         self.assertTrue(hidden_any)
 
+    def test_short_window_masks_fall_inside_the_kept_rows_with_scaled_width(self):
+        x = torch.as_tensor(self.rng_x.normal(0.0, 1.0, (260, 2, 96, 60)), dtype=torch.float32)
+        aug = train.Augment(x, 0, True, rows=24)
+        rng = np.random.default_rng(5)
+        hidden = 0
+        for idx, _, lengths in train.batch_pieces(self.segs, rng):
+            band = (aug.batch(torch.as_tensor(idx), lengths, rng) == 0).all(dim=1).all(dim=2)  # (B, 96) 모든 칸이 0인 줄
+            self.assertFalse(bool(band[:, : 96 - 24].any()))  # 잘라 버릴 앞 줄에는 가리기를 두지 않는다
+            r = band.sum(dim=1).numpy()
+            self.assertTrue(np.all((r == 0) | ((r >= 1) & (r <= 4))), r)  # 5–15줄 × 24/96 = 1–4줄
+            hidden += int((r > 0).sum())
+        self.assertGreater(hidden, 0)
+
+    def test_full_window_rows_draw_exactly_as_before(self):
+        x = torch.as_tensor(self.rng_x.normal(0.0, 1.0, (260, 2, 96, 60)), dtype=torch.float32)
+        old, new = train.Augment(x, 0, True), train.Augment(x, 0, True, rows=96)
+        ra, rb = np.random.default_rng(9), np.random.default_rng(9)
+        for (ia, _, la), (ib, _, lb) in zip(train.batch_pieces(self.segs, ra), train.batch_pieces(self.segs, rb)):
+            np.testing.assert_array_equal(old.batch(torch.as_tensor(ia), la, ra).numpy(), new.batch(torch.as_tensor(ib), lb, rb).numpy())
+
 
 class FitTest(unittest.TestCase):
     def test_non_finite_loss_stops_with_a_reason(self):

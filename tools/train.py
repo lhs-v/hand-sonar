@@ -194,10 +194,12 @@ def standardize_t(a):
 
 class Augment:
     """학습 미니배치 증강(머리말). x는 shift > 0이면 칸 300−shift…359+shift의 표준화 전 창 (N, 2, 96, 60 + 2·shift),
-    0이면 보통 창 (N, 2, 96, 60)이다."""
+    0이면 보통 창 (N, 2, 96, 60)이다. rows(train_seq.py --window)를 주면 창의 마지막 rows줄만 쓰는 모델이라, 시간 가리기를 그 줄 안에
+    두고 폭을 rows ÷ 96배로 줄인다(최소 1줄). 기본(96줄)은 난수 소비까지 예전과 같다."""
 
-    def __init__(self, x, shift, mask):
+    def __init__(self, x, shift, mask, rows=None):
         self.x, self.shift, self.mask = x, int(shift), bool(mask)
+        self.rows = dataset.WINDOW if rows is None else min(int(rows), dataset.WINDOW)
         self.width = dataset.BINS.stop - dataset.BINS.start
         self.cols = torch.arange(self.width, device=x.device)
 
@@ -215,8 +217,12 @@ class Augment:
         rows, bins = np.zeros((count, 2), dtype=np.int64), np.zeros((count, 2), dtype=np.int64)
         if self.mask:
             hide = on & (rng.random(count) < MASK_PROB)
-            tw = rng.integers(MASK_ROWS[0], MASK_ROWS[1] + 1, count)
-            t0 = (rng.random(count) * (dataset.WINDOW - tw + 1)).astype(np.int64)
+            lo, hi = MASK_ROWS
+            if self.rows < dataset.WINDOW:
+                lo = max(1, round(lo * self.rows / dataset.WINDOW))
+                hi = max(lo, round(hi * self.rows / dataset.WINDOW))
+            tw = rng.integers(lo, hi + 1, count)
+            t0 = (dataset.WINDOW - self.rows) + (rng.random(count) * (self.rows - tw + 1)).astype(np.int64)
             bw = rng.integers(MASK_BINS[0], MASK_BINS[1] + 1, count)
             b0 = (rng.random(count) * (self.width - bw + 1)).astype(np.int64)
             rows = np.where(hide[:, None], np.stack([t0, t0 + tw], axis=1), 0)
