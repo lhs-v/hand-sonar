@@ -154,14 +154,18 @@ def pred_to_image(S, n, unit_pred):
     return out
 
 
-def crop_params(px, size, margin=0.25, min_side=110.0, half=2):
+def crop_params(px, size, margin=0.25, min_side=110.0, half=2, wrist_reach=0.0):
     """프레임마다 정사각 자르기 (중심 (N, 2), 한 변 (N,)): 영상 랜드마크 바깥 상자에 margin(한쪽)을 더한다. 손이 없는 프레임은 앞뒤 프레임에서
-    선형으로 채우고(하나도 없으면 영상 가운데), 흔들림을 줄이려고 앞뒤 half개 프레임을 삼각 가중 평균한다. size = 영상 (폭, 높이)."""
+    선형으로 채우고(하나도 없으면 영상 가운데), 흔들림을 줄이려고 앞뒤 half개 프레임을 삼각 가중 평균한다. size = 영상 (폭, 높이).
+    wrist_reach > 0이면 손목에서 손 반대쪽(p0 − p9)으로 그만큼(손목–가운데 MCP 길이 배수) 나간 점도 상자에 넣는다(손목·팔뚝이 보이게)."""
     ok = np.isfinite(px).all(axis=(1, 2))
     n = len(px)
     if not ok.any():
         return np.tile(np.asarray(size, dtype=np.float64) / 2, (n, 1)), np.full(n, float(min(size)))
-    mn, mx = px[ok].min(1), px[ok].max(1)
+    box = px
+    if wrist_reach > 0:
+        box = np.concatenate([px, (px[:, 0] + wrist_reach * (px[:, 0] - px[:, 9]))[:, None]], axis=1)
+    mn, mx = box[ok].min(1), box[ok].max(1)
     c = np.full((n, 2), np.nan)
     side = np.full(n, np.nan)
     c[ok] = (mn + mx) / 2
@@ -199,6 +203,16 @@ K3 = 1.3  # 3D 패널 확대(px/mm), 두 패널 같다
 V0 = -14.0  # 패널 아래 끝의 세로 값(mm) — 손바닥 틀 x(손목 → 검지 방향)
 H0_B = -125.0  # 앞쪽 패널 왼쪽 끝의 가로 값 h = −y
 H0_C = -70.0  # 옆쪽 패널 왼쪽 끝의 가로 값 h = −z
+# 워치 축 3D(2026-11-01): 손목이 원점, 세로 = 워치 x(손 쪽), 앞쪽 h = −y(새끼 쪽이 왼쪽), 옆쪽 h = −z(손등 쪽이 왼쪽). 팔뚝까지 담으려고 줄여 그린다
+K3_W = 1.0  # px/mm
+V0_W = -100.0  # 패널 아래 끝의 세로 값(mm)
+H0_BW = -150.0  # 앞쪽 패널 왼쪽 끝
+H0_CW = -125.0  # 옆쪽 패널 왼쪽 끝
+FOREARM_MM = 100.0  # 그리는 팔뚝 길이(손목에서 워치 −x로)
+ARM_HALF = 24.0  # 팔뚝 반폭(mm)
+WATCH_X = (-56.0, -16.0)  # 워치 몸통이 걸친 x 범위(mm, 손목 기준 대략)
+WATCH_HALF = 20.0  # 워치 몸통 반폭(mm)
+WATCH_Z = (ARM_HALF, ARM_HALF + 12.0)  # 옆에서 본 워치 두께: 팔뚝 손등 쪽 면 위
 PB_M = (376, 84, 276, 320)  # MANO 판: 정답 메시(카메라에서 본 방향)
 PC_M = (668, 84, 276, 320)  # MANO 판: 예측 메시
 MESH_SIDE = 274  # 메시 패널 안 정사각 그림(세로 가운데, 손 영상 패널과 같은 자르기)
@@ -210,9 +224,9 @@ BAND = 5  # 그림 칸 아래 역할 띠 두께
 TL_GAP_SEC = 0.5  # 이웃 점 간격이 이보다 길면 선을 끊는다
 
 
-def to_panel(pt_h, pt_v, panel, h0):
+def to_panel(pt_h, pt_v, panel, h0, k=K3, v0=V0):
     x0, y0, w, h = panel
-    return (x0 + (pt_h - h0) * K3, y0 + h - (pt_v - V0) * K3)
+    return (x0 + (pt_h - h0) * k, y0 + h - (pt_v - v0) * k)
 
 
 def view_points(unit_mm, view):
@@ -220,21 +234,41 @@ def view_points(unit_mm, view):
     return (-unit_mm[:, 1] if view == "front" else -unit_mm[:, 2]), unit_mm[:, 0]
 
 
-def panel_points(mm, panel, h0, view):
+def panel_points(mm, panel, h0, view, k=K3, v0=V0):
     hh, vv = view_points(mm, view)
-    return np.stack([to_panel(a, b, panel, h0) for a, b in zip(hh, vv)]) - np.array((panel[0] + 1, panel[1] + 1))
+    return np.stack([to_panel(a, b, panel, h0, k, v0) for a, b in zip(hh, vv)]) - np.array((panel[0] + 1, panel[1] + 1))
 
 
-def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False, gt_name="MediaPipe"):
+def panels_3d(watch):
+    """3D 패널 둘의 (패널, 가로 시작, 시점, 배율, 세로 시작). watch면 워치 축 판."""
+    if watch:
+        return ((PB, H0_BW, "front", K3_W, V0_W), (PC, H0_CW, "side", K3_W, V0_W))
+    return ((PB, H0_B, "front", K3, V0), (PC, H0_C, "side", K3, V0))
+
+
+def draw_forearm(d, panel, h0, view):
+    """워치 축 판의 바탕: 손목에서 워치 −x로 뻗은 팔뚝(옅은 회색)과 워치 몸통(짙은 회색). 위치는 대략이다."""
+    def rect(h_lo, h_hi, v_lo, v_hi, fill):
+        a = to_panel(h_lo, v_hi, panel, h0, K3_W, V0_W)
+        b = to_panel(h_hi, v_lo, panel, h0, K3_W, V0_W)
+        d.rectangle([a[0], a[1], b[0], b[1]], fill=fill)
+    rect(-ARM_HALF, ARM_HALF, -FOREARM_MM, 0.0, rgb("#e7e5df"))
+    if view == "front":
+        rect(-WATCH_HALF, WATCH_HALF, WATCH_X[0], WATCH_X[1], rgb("#9b9a95"))
+    else:
+        rect(-WATCH_Z[1], -WATCH_Z[0], WATCH_X[0], WATCH_X[1], rgb("#9b9a95"))
+
+
+def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, mano=False, gt_name="MediaPipe", watch=False):
     """영상 내내 같은 배경(제목·범례·패널 틀·격자·평균 자세·설명·띠 바탕)을 한 번 그린다. RGB numpy. mano면 3D 뼈대 대신 메시 패널 둘.
-    gt_name은 범례·메시 제목에 적을 정답 3D 이름(dataset.GT_NAMES)."""
-    if mano:
-        mean_mm = None  # 메시 판에는 3D 뼈대 패널이 없다
+    gt_name은 범례·메시 제목에 적을 정답 3D 이름(dataset.GT_NAMES). watch면 3D 패널이 워치 축 판(팔뚝·워치를 바탕에 그리고, 학습 평균
+    자세는 프레임마다 그 프레임의 손 방향으로 render_frame이 그린다)."""
+    mean_static = None if (mano or watch) else mean_mm  # 메시 판에는 3D 뼈대 패널이 없다
     img = Image.new("RGB", (CW, CH), rgb(SURFACE))
     d = ImageDraw.Draw(img)
     text(d, (16, 24), title, 22, INK, bold=True)
     text(d, (16, 50), subtitle, 13, INK2)
-    entries = ((f"{gt_name} 정답", "gt"), ("FastViT 예측", "pred")) + ((("학습 평균 자세", "mean"),) if mean_mm is not None else ())
+    entries = ((f"{gt_name} 정답", "gt"), ("FastViT 예측", "pred")) + ((("학습 평균 자세", "mean"),) if mean_mm is not None and not mano else ())
     widths = [tlen(d, label, 13) + 28 + 10 for label, _ in entries]
     lx = CW - 16 - sum(widths) - 20 * (len(entries) - 1)
     for (label, kind), wd in zip(entries, widths):
@@ -251,16 +285,18 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, ma
         text(d, (PC_M[0], 72), "예측 MANO — FastViT 관절에 맞춤", 14, INK, bold=True)
         for x0, y0, w, h in (PB_M, PC_M):
             d.rectangle([x0, y0, x0 + w, y0 + h], fill=(255, 255, 255), outline=rgb(BASE))
-    for panel, h0, view in () if mano else ((PB, H0_B, "front"), (PC, H0_C, "side")):
+    for panel, h0, view, k3, v0 in () if mano else panels_3d(watch):
         x0, y0, w, h = panel
         d.rectangle([x0, y0, x0 + w, y0 + h], fill=(255, 255, 255), outline=rgb(BASE))
-        for v in range(0, 251, 50):  # 격자 50 mm
-            _, py = to_panel(0, v, panel, h0)
+        if watch:
+            draw_forearm(d, panel, h0, view)
+        for v in range(-100 if watch else 0, 251, 50):  # 격자 50 mm
+            _, py = to_panel(0, v, panel, h0, k3, v0)
             if y0 < py < y0 + h:
                 d.line([(x0, py), (x0 + w, py)], fill=rgb(GRID), width=1)
                 text(d, (x0 + 4, py - 8), f"{v}", 10, MUTED)
         for hv in range(-150, 151, 50):
-            px, _ = to_panel(hv, 0, panel, h0)
+            px, _ = to_panel(hv, 0, panel, h0, k3, v0)
             if x0 < px < x0 + w:
                 d.line([(px, y0), (px, y0 + h)], fill=rgb(GRID) if hv != 0 else rgb(BASE), width=1)
         text(d, (x0 + w - 4, y0 + h - 9), "mm", 10, MUTED, anchor="rm")
@@ -290,10 +326,10 @@ def static_background(title, subtitle, notes, ymax, video=True, mean_mm=None, ma
             d.rectangle([lx - 14, y + 11, lx - 4, y + 17], fill=rgb(color))
             lx -= 14 + 10
     canvas = np.asarray(img).copy()
-    if mean_mm is not None:  # 학습 평균 자세(모든 프레임이 같다)
-        for panel, h0, view in ((PB, H0_B, "front"), (PC, H0_C, "side")):
+    if mean_static is not None:  # 학습 평균 자세(손바닥 틀 판은 모든 프레임이 같다)
+        for panel, h0, view, k3, v0 in panels_3d(False):
             x0, y0, w, h = panel
-            draw_simple(canvas[y0 + 1: y0 + h, x0 + 1: x0 + w], panel_points(mean_mm, panel, h0, view), rgb(BASE), 1, 1.8)
+            draw_simple(canvas[y0 + 1: y0 + h, x0 + 1: x0 + w], panel_points(mean_static, panel, h0, view, k3, v0), rgb(BASE), 1, 1.8)
     return canvas
 
 
@@ -421,17 +457,31 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
     cv2.rectangle(canvas, (PA[0], PA[1]), (PA[0] + PA[2] - 1, PA[1] + PA[3] - 1), rgb(BASE), 1)
     L = S["L_mm"]
     gt_mm = S["unit"][n] * L  # (21, 3) 손목(원점) 포함
-    gt_ok = bool(np.isfinite(gt_mm).all())
     pr_mm = None if info["pred"] is None else np.vstack([np.zeros((1, 3)), info["pred"] * L])
+    mean_mm = None
+    watch = mano is None and S.get("palm_to_watch") is not None  # MANO 판은 메시를 카메라에서 본 방향으로 그린다
+    no_wrist = False
+    if watch:  # 손바닥 틀 → 워치 축(그 프레임 정답의 손 방향). 손목 정답이 없는 프레임은 3D를 그리지 않는다
+        R = S["palm_to_watch"][n]
+        if np.isfinite(R).all():
+            gt_mm = gt_mm @ R.T
+            pr_mm = None if pr_mm is None else pr_mm @ R.T
+            mean_mm = None if S.get("mean_mm") is None else S["mean_mm"] @ R.T
+        else:
+            no_wrist = True
+            gt_mm, pr_mm = np.full_like(gt_mm, np.nan), None
+    gt_ok = bool(np.isfinite(gt_mm).all())
     if mano is not None:
         for panel, key, color in ((PB_M, "gt", GT_MESH), (PC_M, "pred", PRED_MESH)):
             mesh_panel(canvas, panel, S, n, None if mano[key] is None else mano[key][0], mano["faces"], color)
-    for panel, h0, view in () if mano is not None else ((PB, H0_B, "front"), (PC, H0_C, "side")):
+    for panel, h0, view, k3, v0 in () if mano is not None else panels_3d(watch):
         x0, y0, w, h = panel
         sub = canvas[y0 + 1: y0 + h, x0 + 1: x0 + w]  # 패널 안쪽만 칠한다(바깥은 잘림)
-        pg = panel_points(gt_mm, panel, h0, view) if gt_ok else None
+        if mean_mm is not None:  # 워치 축 판: 학습 평균 자세도 그 프레임의 손 방향으로
+            draw_simple(sub, panel_points(mean_mm, panel, h0, view, k3, v0), rgb(BASE), 1, 1.8)
+        pg = panel_points(gt_mm, panel, h0, view, k3, v0) if gt_ok else None
         if pr_mm is not None:
-            pp = panel_points(pr_mm, panel, h0, view)
+            pp = panel_points(pr_mm, panel, h0, view, k3, v0)
             if pg is not None:
                 for k in range(1, 21):  # 관절별 오차 선(연한 파랑)
                     line(sub, pg[k], pp[k], (170, 196, 232), 1)
@@ -443,6 +493,9 @@ def render_frame(S, bg, n, frame_bgr, info, seg=None, tl=None, mano=None):
     d = ImageDraw.Draw(img)
     if not has_hand or hidden:
         text(d, (PA[0] + PA[2] / 2, PA[1] + PA[3] / 2), "손 없음", 24, "#a3a29b", bold=True, anchor="mm")
+    if no_wrist:
+        for x0, y0, w, h in (PB, PC):
+            text(d, (x0 + w / 2, y0 + h / 2), "손목 정답 없음", 16, "#a3a29b", bold=True, anchor="mm")
     if mano is not None:
         for (x0, y0, w, h), key, empty in ((PB_M, "gt", "정답 없음"), (PC_M, "pred", "예측 없음")):
             if mano[key] is None:

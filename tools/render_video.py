@@ -1,7 +1,7 @@
 """학습한 모델의 결과를 영상으로 본다(손 소나): 세션 하나의 프레임마다 정답 손 뼈대와 FastViT 예측을 함께 그린다.
 
     python -I tools/render_video.py <학습 결과 폴더> --out <출력 폴더> [--data 데이터 폴더] [--session 세션] [--frames test|all]
-                                    [--video 영상 파일 | --no-video] [--seg] [--mano MANO_LEFT.pkl] [--check N] [--limit N] [--fps F]
+                                    [--video 영상 파일 | --no-video] [--seg] [--mano MANO_LEFT.pkl] [--palm-frame] [--check N] [--limit N] [--fps F]
                                     [--font 글꼴 [--font-bold 굵은 글꼴]]
 
 - 학습 결과 폴더: train.py가 쓴 model.pt·dataset.npz·metrics.json. 나누기는 metrics.json의 mode·split(블록 offset, 세션 이름)으로
@@ -20,6 +20,12 @@
   줄 수와 같고 버린 줄이 없을 때, 없으면(공개 데이터 변환 — --video로 원본 mp4를 준다) 줄 n을 영상의 n번째 프레임으로 본다. 기본 영상이 없거나
   맞지 않으면 영상 없이 그린다(--no-video와 같은 판: 왼쪽 패널은 어두운 바탕에 화면 좌표 뼈대). 영상은 가변 프레임률이라 처음부터 차례로 디코드한다.
 - --seg: 왼쪽 패널에서 손만 남긴다(hand_seg: 랜드마크 사전 마스크 + GrabCut). 랜드마크가 없는 프레임은 원본을 쓰지 않고 어두운 빈 패널.
+- 손목도 보이게(2026-11-01): 손 영상 자르기는 손목에서 손 반대쪽으로 손목–가운데 MCP 길이의 WRIST_REACH배까지 담는다
+  (render_draw.crop_params). 손목·워치·팔뚝은 --seg 없이 그려야 보인다(--seg는 손목 아래 흰 워치를 배경 색으로 보고 지운다).
+  3D 두 시점은 손목 정답(wrist.session_wrist — 왼손·워치 센서가 있는 세션)이 있으면 워치 축 판이다: 손목 원점, 세로 = 워치 x(손 쪽),
+  팔뚝·워치를 회색으로 대략 그리고, 정답·예측·학습 평균 자세를 그 프레임 정답의 손 방향(손바닥 틀 → 카메라 → 워치 회전)으로 돌려 그린다.
+  그래서 손목 꺾임이 보인다(예측 모델은 손목을 내지 않으므로 손 방향은 정답). 손목 정답이 없는 프레임은 3D를 그리지 않는다.
+  --palm-frame이면 예전처럼 손바닥 틀(손목 꺾임이 안 보임)로 그린다.
 - --mano: 3D 뼈대 두 시점 대신 정답·예측 MANO 메시를 카메라에서 본 방향으로 나란히 그린다(mano.py — 모델 파일은 https://mano.is.tue.mpg.de
   에 등록하고 받는다, 저장소에 넣지 않는다). 모양·크기는 세션 정답으로 하나, 손 방향·위치는 두 메시 모두 정답 그대로라 손가락 모양만
   다르다. 프레임마다 따로 맞추고 평활하지 않는다(맞춤 잔차를 패널에 적는다).
@@ -49,6 +55,7 @@ CARD_SEC = 1.5  # 구간 제목 카드 길이
 TL_WINDOW_SEC = 30.0  # 시간 띠: 구간이 이보다 길면 이 길이의 창이 지금 프레임을 따라간다
 NO_VIDEO_SIZE = (360, 480)  # 영상도 meta video도 없을 때 화면 좌표에 곱하는 (폭, 높이): 폰 앱의 세로 3:4
 LOG_EVERY = 500
+WRIST_REACH = 0.7  # 손 영상 자르기가 손목에서 손 반대쪽으로 담는 길이(손목–가운데 MCP 배수)
 ROLE_TAGS = (("학습 프레임", D.GREEN), ("검증 프레임(멈춤 판단에만 씀)", D.ORANGE), ("시험 프레임(학습에 안 씀)", D.PURPLE))
 TITLES = {"blocks": "처음 보는 10 s 덩어리 — 블록 나누기의 시험 블록", "session": "처음 보는 세션 — 세션 나누기의 시험 세션",
           "time": "세션 끝 15% — 시간 나누기의 시험 구간", "overfit": "과적합 점검 — 학습한 프레임 그대로"}
@@ -60,7 +67,10 @@ NOTE_MANO = ("MANO 왼손을 프레임마다 관절 21점에 맞춘 메시입니
              "손가락 모양만 다릅니다. 평활 없음. 잔차 = 맞춘 MANO 관절과 목표 관절의 평균 거리.")
 
 
-def note_3d(L):
+def note_3d(L, watch=False):
+    if watch:
+        return (f"워치 축: 손목이 원점, 세로 = 워치 x(손 쪽), 회색 막대 = 팔뚝·워치(위치는 대략). 손 방향은 정답(손목 정답), 손가락 모양만 예측. "
+                f"단위 손 × 세션 L {L:.1f} mm. 검정 = 정답, 파랑 = 예측, 회색 = 학습 평균 자세, 연한 파란 선 = 관절별 오차.")
     return (f"손바닥 틀: 손목이 원점, 세로 = 손목→검지 MCP 방향. 단위 손 × 세션 L {L:.1f} mm. 검정 = 정답, 파랑 = 예측, 회색 = 학습 평균 자세, "
             "연한 파란 선 = 관절별 오차. 축은 모든 프레임이 같습니다.")
 
@@ -161,8 +171,9 @@ def video_source(args, data, name, n_rows, meta, dropped):
     return path, size, f"영상 {path}({size[0]}×{size[1]}{note})"
 
 
-def prepare(data, run, m, saved, parts, k, frames, size):
-    """세션 프레임(0…N−1) 기준 자료 S: render_draw 머리말의 칸 + 역할·예측·오차·동작·자르기. 돌려주는 두 번째 값은 장치 이름."""
+def prepare(data, run, m, saved, parts, k, frames, size, watch=True):
+    """세션 프레임(0…N−1) 기준 자료 S: render_draw 머리말의 칸 + 역할·예측·오차·동작·자르기. 돌려주는 두 번째 값은 장치 이름.
+    watch면 손목 정답이 있을 때 S["palm_to_watch"](프레임마다 손바닥 틀 → 워치 축 회전 (N, 3, 3), 없는 프레임 nan)를 채운다(머리말)."""
     name = str(saved["sessions"][k])
     folder = hs_io.session_folder(data, name)
     pred_ds, y_ds, device = predict_session(data, run, saved, k)
@@ -180,7 +191,14 @@ def prepare(data, run, m, saved, parts, k, frames, size):
         real = joints.to_left(np.nan_to_num(S["world"], nan=0.0), hand)
         coords, rot = joints.palm_frame(real)
         unit, Lm = joints.unit_hand(coords)
-    S.update(real=real, rot=rot, unit=unit, Lm=Lm)
+    S.update(real=real, rot=rot, unit=unit, Lm=Lm, palm_to_watch=None)
+    if watch and hand == "left":
+        try:
+            w, _ = wrist.session_wrist(data, name)
+        except Exception:  # noqa: BLE001  손목 정답이 넘어져도 영상은 손바닥 틀 판으로 그린다
+            w = None
+        if w is not None and "to_watch" in w:
+            S["palm_to_watch"] = np.einsum("mab,mcb->mac", w["to_watch"].astype(np.float64), rot)  # 워치 ← 카메라 ← 손바닥 틀(rot의 전치)
     mine = np.flatnonzero(saved["session"] == k)
     row_of = {int(t): i for i, t in enumerate(marks.frame_ns)}
     pos = np.array([row_of[int(t)] for t in saved["frame_ns"][mine]], dtype=np.int64)  # 학습 자료 프레임 → 세션 프레임
@@ -208,7 +226,7 @@ def prepare(data, run, m, saved, parts, k, frames, size):
     S["prompt"], S["class_id"], S["edge"] = p["prompt"], p["classId"], p["edge"] == 1
     S["labelled"] = (p["prompt"] >= 0) & (p["edge"] == 0) & (p["classId"] != pairs.PAUSE_CLASS) & (p["flag"] != "wrong")
     S["prompts"] = {q["index"]: q for q in hs_io.read_prompts(folder)}
-    S["crop_c"], S["crop_side"] = D.crop_params(S["img_px"], size)
+    S["crop_c"], S["crop_side"] = D.crop_params(S["img_px"], size, wrist_reach=WRIST_REACH)
     shown = np.r_[S["err"][np.isfinite(S["err"])], S["mean_err"][np.isfinite(S["mean_err"])]]
     S["ymax"] = float(max(40.0, np.ceil(np.percentile(shown, 99) / 10) * 10)) if len(shown) else 40.0
     return S, device
@@ -373,6 +391,7 @@ def main():
     source.add_argument("--no-video", action="store_true", help="영상 없이 화면 좌표 뼈대만")
     parser.add_argument("--seg", action="store_true", help="왼쪽 패널에서 손만 남긴다(GrabCut)")
     parser.add_argument("--mano", metavar="MANO_LEFT.pkl", help="3D 뼈대 대신 정답·예측 MANO 메시(모델 파일 또는 mano_v1_2를 푼 폴더 — 저장소 밖)")
+    parser.add_argument("--palm-frame", action="store_true", help="3D를 손바닥 틀로(손목 꺾임이 안 보이는 예전 판). 기본은 손목 정답이 있으면 워치 축")
     parser.add_argument("--check", type=int, metavar="N", help="영상 대신 고르게 뽑은 N장과 첫 제목 카드를 PNG로")
     parser.add_argument("--limit", type=int, metavar="N", help="앞 N장만 그린다")
     parser.add_argument("--fps", type=float, help="출력 초당 장 수(없으면 카메라 프레임 간격 중앙값)")
@@ -396,7 +415,7 @@ def main():
         video, size, how = video_source(args, args.data, name, len(marks.frame_ns), meta, marks.dropped)
         if args.seg and video is None:
             raise ValueError("손만 보이기(--seg)에는 영상이 필요함")
-        S, device = prepare(args.data, args.run, m, saved, parts, k, args.frames, size)
+        S, device = prepare(args.data, args.run, m, saved, parts, k, args.frames, size, watch=not args.palm_frame)
         segs = plan(S, m["mode"], args.frames)
     except (ValueError, FileNotFoundError) as e:
         print(f"멈춤: {e}")
@@ -409,8 +428,11 @@ def main():
     gt_name = dataset.GT_NAMES[S["gt"]]
     subtitle = (f"FastViT-T12 · 실행 {run_name} · 세션 {name}({'왼손' if S['hand'] == 'left' else '오른손'}) · 정답 = {gt_name} 손 관절"
                 " · 시간은 학습 자료 첫 프레임부터")
-    bg = D.static_background(title, subtitle, (NOTE_VIDEO.format(gt=gt_name) if video else NOTE_NO_VIDEO, NOTE_MANO if args.mano else note_3d(S["L_mm"])),
-                             S["ymax"], video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano), gt_name=gt_name)
+    watch = S["palm_to_watch"] is not None and not args.mano  # MANO 판은 메시를 카메라에서 본 방향으로 그린다
+    print(f"  3D: {'MANO 메시(카메라에서 본 방향)' if args.mano else '워치 축(손목 꺾임이 보임)' if watch else '손바닥 틀'}")
+    bg = D.static_background(title, subtitle, (NOTE_VIDEO.format(gt=gt_name) if video else NOTE_NO_VIDEO,
+                                               NOTE_MANO if args.mano else note_3d(S["L_mm"], watch)),
+                             S["ymax"], video=video is not None, mean_mm=S["mean_mm"], mano=bool(args.mano), gt_name=gt_name, watch=watch)
     order = [(i, int(f)) for i, s in enumerate(segs) for f in s["frames"]]
     if args.limit:
         order = order[: args.limit]

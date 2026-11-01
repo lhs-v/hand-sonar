@@ -70,6 +70,14 @@ class GeometryTest(unittest.TestCase):
         c, side = D.crop_params(np.full((2, 21, 2), np.nan), (360, 480))
         np.testing.assert_allclose(c, [[180.0, 240.0]] * 2)  # 손이 하나도 없으면 영상 가운데
 
+    def test_crop_reaches_past_the_wrist_toward_the_forearm(self):
+        px = hand_world()[None, :, :2] * np.array([1500.0, -1500.0]) + np.array([180.0, 400.0])
+        reach = px[0, 0] + 0.7 * (px[0, 0] - px[0, 9])  # 손목에서 손 반대쪽(팔뚝)으로
+        c, side = D.crop_params(px, (360, 480), half=0)
+        self.assertFalse(np.all(np.abs(reach - c[0]) <= side[0] / 2))  # 손만 담는 자르기에는 없다
+        c, side = D.crop_params(px, (360, 480), half=0, wrist_reach=0.7)
+        self.assertTrue(np.all(np.abs(reach - c[0]) <= side[0] / 2))
+
 
 @unittest.skipUnless(D.find_fonts(), "한글 글꼴이 없음(render_draw.FONTS)")
 class RenderTest(unittest.TestCase):
@@ -111,6 +119,34 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(blue(img, D.PB_M), 0)  # 정답 메시는 회색
         img = D.render_frame(self.S, bg, 0, self.frame, self.info, None, self.tl, {"faces": faces, "gt": None, "pred": None})
         self.assertEqual(blue(img, D.PC_M), 0)
+
+    def test_mano_panels_ignore_the_watch_frame(self):
+        bg = D.static_background("제목", "부제", ("설명 하나", "설명 둘"), 40.0, mano=True)
+        verts = joints.with_wrist(self.y[:1])[0] * self.S["L_mm"]
+        mano = {"faces": np.array([[0, 5, 17], [5, 9, 13]]), "gt": (verts, 2.0), "pred": (verts, 4.0)}
+        plain = D.render_frame(self.S, bg, 0, self.frame, self.info, None, self.tl, mano)
+        S = dict(self.S)
+        S["palm_to_watch"] = np.full((3, 3, 3), np.nan)  # 손목 정답이 없어도 메시 판에는 '손목 정답 없음'을 쓰지 않는다
+        np.testing.assert_array_equal(D.render_frame(S, bg, 0, self.frame, self.info, None, self.tl, mano), plain)
+
+    def test_watch_view_tilts_the_hand_with_the_wrist_and_skips_frames_without_it(self):
+        bg = D.static_background("제목", "부제", ("설명 하나", "설명 둘"), 40.0, watch=True)
+
+        def dark_x(img):  # 옆쪽 패널에서 검은 정답 뼈대 픽셀의 가로 평균
+            x0, y0, w, h = D.PC
+            p = img[y0 + 2: y0 + h - 2, x0 + 2: x0 + w - 2].astype(int)
+            ys, xs = np.nonzero((p < 40).all(axis=2))
+            return xs.mean() if len(xs) else None
+
+        S = dict(self.S)
+        S["palm_to_watch"] = np.repeat(np.eye(3)[None], 3, axis=0)
+        straight = dark_x(D.render_frame(S, bg, 0, self.frame, self.info, None, self.tl))
+        a = np.radians(40)  # 손 방향(손바닥 틀 x)을 손등 쪽(워치 +z)으로 40° 젖힘
+        S["palm_to_watch"] = np.repeat(np.array([[np.cos(a), 0, -np.sin(a)], [0, 1, 0], [np.sin(a), 0, np.cos(a)]])[None], 3, axis=0)
+        bent = dark_x(D.render_frame(S, bg, 0, self.frame, self.info, None, self.tl))
+        self.assertLess(bent, straight - 20)  # 옆쪽 패널은 왼쪽이 손등 쪽
+        S["palm_to_watch"] = np.full((3, 3, 3), np.nan)  # 손목 정답이 없는 프레임
+        self.assertIsNone(dark_x(D.render_frame(S, bg, 0, self.frame, self.info, None, self.tl)))
 
     def test_hand_only_view_never_shows_the_frame_outside_the_alpha(self):
         def green(img):  # 영상의 초록(RGB)이 남은 픽셀 수 — 흰 정답 선·파란 예측은 세지 않는다

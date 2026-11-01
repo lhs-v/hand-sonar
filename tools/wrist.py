@@ -32,8 +32,9 @@
   맞혔다(보고서 hand-sonar/2026-10-31-hamer-wrist-check). 두 3D는 같은 축(거울 그림 기준 카메라 축)이다.
 - 쓸 수 있는 프레임(ok): 추적하는 손(HaMeR면 HaMeR 관절도)이 있고, 워치 자이로 표본이 그 시각 ±MAX_GAP_MS 안에 있다. 왼손 세션만 계산한다
   (오른손은 워치 축이 다르다).
-session_wrist(data, name) → ({"u": (M, 3), "depth": (M, 3), "ok": (M,), "method": str, "source": str}, 보고 줄) 또는 (None, 보고 줄).
-M = landmarks.csv 프레임 수.
+session_wrist(data, name) → ({"u": (M, 3), "depth": (M, 3), "ok": (M,), "method": str, "source": str, "to_watch": (M, 3, 3)}, 보고 줄)
+또는 (None, 보고 줄). M = landmarks.csv 프레임 수. to_watch는 프레임마다 카메라 축 K → 워치 축 회전(ok가 아닌 프레임은 nan) — u = to_watch ·
+손 방향(K)이고, render_video가 3D를 워치 축으로 그릴 때 쓴다.
 """
 import argparse
 import math
@@ -268,7 +269,9 @@ def session_wrist(data, name):
         if sel.sum() >= 10:
             lines.append(f"  {label}: 젖힘 {np.median(ext[sel]):.1f}° [{np.percentile(ext[sel], 10):.1f}, {np.percentile(ext[sel], 90):.1f}]"
                          f" · 꺾임 {np.median(dev[sel]):.1f}° [{np.percentile(dev[sel], 10):.1f}, {np.percentile(dev[sel], 90):.1f}]")
-    return {"u": u.astype(np.float32), "depth": depth.astype(np.float32), "ok": ok, "method": method, "source": source}, lines
+    to_watch[~ok] = np.nan
+    return {"u": u.astype(np.float32), "depth": depth.astype(np.float32), "ok": ok, "method": method, "source": source,
+            "to_watch": to_watch.astype(np.float32)}, lines
 
 
 def main():
