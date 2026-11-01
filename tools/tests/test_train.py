@@ -3,6 +3,7 @@ import unittest
 import train  # 사용자 설치 numpy·torch·timm 경로도 여기서 붙는다
 
 import joints  # noqa: E402
+import kinematics  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
@@ -171,6 +172,73 @@ class FitTest(unittest.TestCase):
         segs = [np.arange(8)]
         model, history, best, stopped = train.fit(x, torch.zeros((8, 60)), segs, segs, epochs=5, seed=0, log=lambda line: None, max_minutes=0.0)
         self.assertEqual(("time", 1, 1), (stopped, len(history), best))  # 상한 0분: 첫 epoch 뒤 멈춤
+
+
+PALM = np.array([[0.25, -0.30, -0.10], [1.10, 0.0, 0.0], [1.00, 0.28, 0.02], [0.88, 0.52, 0.01], [0.70, 0.71, 0.0]])  # 단위 손 손바닥 점 다섯
+LENGTHS = np.array([0.45, 0.35, 0.30, 0.45, 0.28, 0.24, 0.50, 0.32, 0.25, 0.46, 0.30, 0.24, 0.36, 0.22, 0.21])
+
+
+def kinematic_targets(seed, n=50):
+    """뼈 길이가 고정된 합성 목표 (n, 20, 3)."""
+    return kinematics.fk(np.random.default_rng(seed).uniform(-0.5, 0.5, size=(n, 15, 2)), PALM, LENGTHS)
+
+
+class KinematicHeadTest(unittest.TestCase):
+    def test_angle_heads_output_positions_with_template_bones_and_keep_extras(self):
+        t = kinematics.fit_template(kinematic_targets(31), bins=8)
+        for head in ("angles", "bins"):
+            model = train.make_model(train.FINGER_OUT + train.WRIST_OUT, head=head, template=t).eval()
+            with torch.no_grad():
+                out = model(torch.zeros(2, 2, 96, 60))
+            self.assertEqual((2, 63), tuple(out.shape))
+            p = out[:, :60].reshape(2, 20, 3).numpy()  # 뼈 길이는 템플릿 그대로
+            np.testing.assert_allclose(np.linalg.norm(p[:, 5] - p[:, 4], axis=1), t["lengths"][3], rtol=1e-5)
+        self.assertIsNotNone(model.logits)
+
+    def test_bins_model_reloads_from_its_state_dict(self):
+        t = kinematics.fit_template(kinematic_targets(32), bins=8)
+        model = train.make_model(train.FINGER_OUT, head="bins", template=t).eval()
+        fresh = train.make_model(train.FINGER_OUT, head="bins", head_bins=8).eval()
+        fresh.load_state_dict(model.state_dict())
+        x = torch.as_tensor(np.random.default_rng(33).normal(size=(2, 2, 96, 60)).astype(np.float32))
+        with torch.no_grad():
+            np.testing.assert_allclose(fresh(x).numpy(), model(x).numpy(), atol=1e-6)
+
+    def test_bin_term_counts_only_for_bins_models(self):
+        y = kinematic_targets(34, n=4)
+        angles = torch.as_tensor(kinematics.ik(y).reshape(4, 30), dtype=torch.float32)
+        x = torch.zeros(4, 2, 96, 60)
+        for head, positive in (("coords", False), ("angles", False), ("bins", True)):
+            t = kinematics.fit_template(kinematic_targets(35), bins=8 if head == "bins" else 0)
+            model = train.make_model(train.FINGER_OUT, head=head, template=t if head != "coords" else None)
+            model(x)
+            term = float(train.bin_term(model, angles, 0.5))
+            self.assertEqual(positive, term > 0, head)
+
+    def test_fit_trains_a_bins_head(self):
+        y = kinematic_targets(36, n=8)
+        t = kinematics.fit_template(y, bins=8)
+        x = torch.as_tensor(np.random.default_rng(37).normal(size=(8, 2, 96, 60)).astype(np.float32))
+        target = torch.as_tensor(y.reshape(8, 60), dtype=torch.float32)
+        angles = torch.as_tensor(kinematics.ik(y).reshape(8, 30), dtype=torch.float32)
+        segs = [np.arange(8)]
+        model, history, best, stopped = train.fit(x, target, segs, segs, epochs=2, seed=0, log=lambda line: None, head="bins", template=t,
+                                                  angles=angles, bin_weight=0.1)
+        self.assertEqual(2, len(history))
+        self.assertEqual((8, 60), train.predict(model, x, np.arange(8)).shape)
+
+
+class HeadMetricsTest(unittest.TestCase):
+    def test_truth_has_no_angle_error_and_template_bones_give_no_ceiling(self):
+        y = kinematic_targets(38, n=40)
+        ds = {"y": y.reshape(40, 60).astype(np.float32), "session": np.zeros(40, dtype=np.int16), "length_mm": np.array([87.0])}
+        train_idx, test_idx = np.arange(30), np.arange(30, 40)
+        t = kinematics.fit_template(y[train_idx], bins=0)
+        m = train.head_metrics(ds, ds["y"], train_idx, test_idx, template=t)
+        self.assertAlmostEqual(0.0, m["angles"]["model"]["flexionDeg"], places=3)
+        self.assertGreater(m["angles"]["meanPose"]["flexionDeg"], 1.0)  # 평균 자세는 시험 각도를 못 맞춘다
+        self.assertLess(m["ceilingMm"], 1e-3)  # 뼈 길이가 모두 같은 합성 손
+        self.assertNotIn("ceilingMm", train.head_metrics(ds, ds["y"], train_idx, test_idx))
 
 
 class InstrumentsTest(unittest.TestCase):

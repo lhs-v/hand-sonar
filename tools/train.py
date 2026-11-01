@@ -2,7 +2,8 @@
 
     python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 100]
                              [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--shift 5] [--mask] [--wrist 0.1]
-                             [--gt mediapipe|hamer] [--row-norm] [--channels base|split|all] [--save-x] [세션 …]
+                             [--gt mediapipe|hamer] [--row-norm] [--channels base|split|all] [--head coords|angles|bins] [--bin-weight 0.01]
+                             [--save-x] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
   report.png로 쓴다. 저장소에는 아무것도 쓰지 않는다. dataset.npz는 기본으로 창 x 없이 row·목표·라벨·입력 지문만 쓴다(--save-x면 창도).
@@ -28,6 +29,12 @@
   워치8 녹음의 줄 전체 흔들림(약 0.3%)이 손 자리 칸에 남기는 몫을 없앤다. metrics.json rowNorm·model.pt row_norm에 남기고 실행 이름에 붙인다.
 - 입력 채널(--channels, 2026-10-31): base(기본, 한 주기 원본·차분 2채널), split(오름·내림 원본·차분 4채널), all(6채널). split·all은
   삼각 녹음을 profiles.py --split으로 만든 세션만 쓴다(dataset 머리말). 모델 입력 채널 수는 자료에서 정하고 model.pt in_chans·channels에 남긴다.
+- 관절 각도 머리(--head, 2026-11-01): coords(기본, 점 60값 직접 회귀 — 논문과 같음), angles(뼈 15개의 굽힘·벌림 30값을 회귀해 순기구학),
+  bins(같은 30각을 각도마다 HEAD_BINS칸으로 분류하고 칸 확률의 기댓값으로 순기구학). 손바닥 점 다섯과 뼈 길이는 학습 프레임에서 정해
+  고정한다(kinematics 머리말). 손실은 순기구학한 점에 그대로 MSE + 속도 손실이고, bins는 학습 손실에만 --bin-weight × 칸 교차 엔트로피
+  (정답 각도에 씌운 가우스 칸 분포)를 더한다. 검증 손실과 조기 종료는 점 손실만 본다. 시험 정답을 각도로 바꿨다 되돌린 오차를 표현
+  한계(metrics.json head ceilingMm)로 남긴다. HaMeR 정답은 0.26 mm, MediaPipe 정답은 4.16 mm였다(손바닥·뼈가 프레임마다 흔들림).
+  관절 각 오차(뼈 15개 굽힘·벌림 차의 절댓값 평균, 도)는 머리와 상관없이 모델과 평균 자세 둘 다 metrics.json angles에 남긴다.
 - 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs
   (100)와 벽시계 상한 --max-minutes(20분, 그 epoch 뒤 멈춤)를 둔다. 학습·검증 손실이 nan·inf면 이유를 적고 끝 코드 1로 멈춘다.
   씨앗값을 고정하고 cuDNN 결정적 계산을 쓴다(benchmark 끔. 이 계획을 쓰며 잰 값: 한 걸음이 0.067 → 0.075 s).
@@ -71,6 +78,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))  # python -I는 3.11
 import hs_io  # noqa: E402  사용자 설치 numpy·torch·timm 경로도 여기서 붙는다
 import dataset  # noqa: E402
 import joints  # noqa: E402
+import kinematics  # noqa: E402
 import numpy as np  # noqa: E402
 import pairs  # noqa: E402
 import timm  # noqa: E402
@@ -105,6 +113,9 @@ GAP_DRAW = 1.0  # 시험 블록을 이어 붙여 그릴 때 블록 사이를 비
 FINGER_OUT = 60  # 손가락 목표 값 수(점 1–20 × xyz)
 WRIST_OUT = 3  # 손목 목표 값 수(워치 축 손 방향)
 DEPTH_WEIGHT = 0.25  # 손목 손실에서 카메라 깊이 성분의 무게(MediaPipe 깊이는 투영에서 추정한 값이라 가볍게)
+HEADS = ("coords", "angles", "bins")  # --head
+HEAD_BINS = 48  # 칸 머리의 각도당 칸 수(HaMeR 톱니 두 세션에서 칸 폭 0.4–3.5°)
+BIN_WEIGHT = 0.01  # 칸 교차 엔트로피의 기본 무게(--bin-weight)
 
 
 def velocity_loss(pred, true, pair):
@@ -130,6 +141,13 @@ def loss_fn(pred, true, pair, wrist_weight=0.0):
     if wrist_weight > 0:
         loss = loss + wrist_weight * wrist_loss(pred[:, f: f + 3], true[:, f: f + 3], true[:, f + 3: f + 6], true[:, f + 6])
     return loss
+
+
+def bin_term(model, angles, weight):
+    """칸 머리(kinematics.Head, bins > 0)의 마지막 forward 로짓으로 낸 칸 교차 엔트로피 × weight. 다른 머리나 무게 0이면 0. angles (B, 30)."""
+    if weight <= 0 or not isinstance(model, kinematics.Head) or not model.bins:
+        return torch.zeros((), device=angles.device)
+    return weight * kinematics.bin_loss(model.logits, angles, model.centers)
 
 
 def segments(t_ns, session, index, gap_sec=CHUNK_GAP_SEC):
@@ -228,8 +246,24 @@ def seed_all(seed):
     torch.backends.cudnn.deterministic = True
 
 
-def make_model(outputs=FINGER_OUT, in_chans=2):
-    return timm.create_model(ARCH, pretrained=False, in_chans=in_chans, num_classes=outputs)
+def make_model(outputs=FINGER_OUT, in_chans=2, head="coords", template=None, head_bins=0):
+    """timm 모델(출력 outputs값). head가 angles·bins면 몸통 출력을 관절 각도로 바꿔 순기구학하는 kinematics.Head로 감싼다(출력은 그대로
+    점 60값 + 뒤 손목 값). template은 학습 프레임의 kinematics.fit_template이다. 없으면 빈 템플릿(bins는 head_bins칸)으로 만들어
+    저장한 state_dict를 불러올 자리로 쓴다."""
+    if head == "coords":
+        return timm.create_model(ARCH, pretrained=False, in_chans=in_chans, num_classes=outputs)
+    if head not in HEADS:
+        raise ValueError(f"머리 {head!r}은 {'·'.join(HEADS)} 중 하나여야 함")
+    if template is None:
+        template = kinematics.empty_template(head_bins if head == "bins" else 0)
+    if head == "angles":
+        template = {k: v for k, v in template.items() if k != "centers"}
+    elif template.get("centers") is None:
+        raise ValueError("bins 머리에는 칸 중심이 있는 템플릿이 필요함(kinematics.fit_template bins > 0)")
+    extra = outputs - FINGER_OUT
+    bins = int(np.shape(template["centers"])[1]) if head == "bins" else 1
+    backbone = timm.create_model(ARCH, pretrained=False, in_chans=in_chans, num_classes=kinematics.ANGLES * bins + extra)
+    return kinematics.Head(backbone, template, extra=extra)
 
 
 def predict(model, x, index):
@@ -248,12 +282,14 @@ def eval_loss(model, x, y, segs, wrist_weight=0.0):
     return float(loss_fn(pred, y[torch.as_tensor(idx, device=x.device)], torch.as_tensor(pairs_of(segs), device=x.device), wrist_weight))
 
 
-def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES, augment=None, wrist_weight=0.0):
+def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES, augment=None, wrist_weight=0.0, head="coords",
+        template=None, angles=None, bin_weight=0.0):
     """(가장 좋던 가중치의 모델, 기록, 가장 좋던 epoch, 멈춘 까닭 "patience" | "epochs" | "time"). x (N, 2, 96, 60)·y (N, 60)는 같은 장치의
     텐서. 학습·검증 손실이 유한하지 않으면(nan·inf) 그 자리에서 이유를 담은 FloatingPointError로 멈춘다. augment(Augment)를 주면 학습
-    미니배치만 그것으로 만들고 검증은 x 그대로다. wrist_weight > 0이면 y는 (N, 67)(loss_fn)이고 모델 출력은 63값이다."""
+    미니배치만 그것으로 만들고 검증은 x 그대로다. wrist_weight > 0이면 y는 (N, 67)(loss_fn)이고 모델 출력은 63값이다. head·template은
+    make_model로 넘기고, angles (N, 30)(정답 관절 각도)와 bin_weight > 0이면 학습 손실에 bin_term을 더한다(검증 손실에는 넣지 않는다)."""
     torch.manual_seed(seed)
-    model = make_model(FINGER_OUT + (WRIST_OUT if wrist_weight > 0 else 0), in_chans=int(x.shape[1])).to(x.device)
+    model = make_model(FINGER_OUT + (WRIST_OUT if wrist_weight > 0 else 0), in_chans=int(x.shape[1]), head=head, template=template).to(x.device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
     rng = np.random.default_rng(seed)
     best, best_epoch, best_state, history, stopped = float("inf"), 0, None, [], "epochs"
@@ -265,6 +301,8 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MIN
             i = torch.as_tensor(idx, device=x.device)
             inputs = x[i] if augment is None else augment.batch(i, lengths, rng)
             loss = loss_fn(model(inputs), y[i], torch.as_tensor(pair, device=x.device), wrist_weight)
+            if angles is not None:
+                loss = loss + bin_term(model, angles[i], bin_weight)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -323,6 +361,20 @@ def block_table(ds, block, role, keep):
                          "frames": int(m.sum()), "kept": int((m & keep).sum()),
                          "kinds": {key: int((m & keep & (kind == k)).sum()) for k, key in enumerate(dataset.KIND_KEYS)}})
     return rows
+
+
+def head_metrics(ds, pred, train, test, template=None):
+    """시험 프레임의 관절 각 오차(모델과 학습 평균 자세, kinematics.angle_errors)와, template이 있으면 표현 한계 ceilingMm(시험 정답을 각도로
+    바꿨다 템플릿 손바닥·뼈로 되돌린 MPJPE, mm). pred는 (N, 60) 단위 손 예측."""
+    yy = np.asarray(ds["y"], dtype=np.float64).reshape(-1, 20, 3)
+    true = yy[test]
+    mean = joints.mean_pose(yy[train])
+    out = {"angles": {"model": kinematics.angle_errors(np.asarray(pred, dtype=np.float64).reshape(-1, 20, 3)[test], true),
+                      "meanPose": kinematics.angle_errors(np.repeat(mean[None], len(test), axis=0), true)}}
+    if template is not None:
+        rec = kinematics.fk(kinematics.ik(true), template["palm"], template["lengths"])
+        out["ceilingMm"] = float(np.mean(joints.frame_errors(rec, true) * ds["length_mm"][ds["session"][test]]))
+    return out
 
 
 def instruments(ds, pred, train, test):
@@ -620,6 +672,13 @@ def report(m):
         f"{text} {k['mpjpeMm']:.1f}({k['meanPoseMm']:.1f}, {k['ratioToMeanPose']:.2f}, {k['frames']})" if k["frames"] else f"{text} 시험에 없음"
         for key, text in dataset.KINDS for k in [m["perKind"][key]]))
     lines.append(f"  나누기별 MPJPE: " + ", ".join(f"{k} {v:.2f} mm" for k, v in m["splitMpjpeMm"].items()))
+    h, a = m.get("head"), m.get("angles")
+    if h and h["type"] != "coords":
+        bins = f"({h['bins']}칸, 칸 손실 무게 {h['binWeight']:g})" if h["bins"] else ""
+        lines.append(f"  관절 각도 머리 {h['type']}{bins}: 표현 한계(시험 정답을 각도로 바꿨다 되돌림) {h['ceilingMm']:.2f} mm")
+    if a:
+        lines.append(f"  관절 각 오차(뼈 15개, 도): 굽힘 FastViT {a['model']['flexionDeg']:.1f}(평균 자세 {a['meanPose']['flexionDeg']:.1f}),"
+                     f" 벌림 {a['model']['abductionDeg']:.1f}({a['meanPose']['abductionDeg']:.1f})")
     w = m.get("wrist")
     if w and "angleDeg" in w:
         a, g, e, v, k = w["angleDeg"], w["imagePlaneAngleDeg"], w["extensionAbsErrDeg"], w["deviationAbsErrDeg"], w["slope"]
@@ -711,6 +770,9 @@ def main():
     parser.add_argument("--row-norm", action="store_true", help="줄 단위 정규화: 원본 프로파일 줄마다 600칸 |값| 합으로 나누고 차분을 다시 낸다")
     parser.add_argument("--channels", choices=tuple(dataset.CHANNEL_SETS), default="base",
                         help="입력 채널: base(한 주기 원본·차분), split(오름·내림 원본·차분 4채널), all(6채널). split·all은 profiles.py --split한 삼각 녹음만")
+    parser.add_argument("--head", choices=HEADS, default="coords",
+                        help="출력: coords(점 60값 회귀, 기본), angles(관절 각도 30값 회귀 + 순기구학), bins(각도 칸 분류 + 순기구학). 손바닥·뼈 길이는 학습 프레임으로 고정")
+    parser.add_argument("--bin-weight", type=float, default=BIN_WEIGHT, metavar="무게", help=f"--head bins의 칸 교차 엔트로피 무게(기본 {BIN_WEIGHT:g})")
     parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
     if not 0 <= args.shift <= dataset.BINS.start:
@@ -718,6 +780,9 @@ def main():
         return 1
     if args.wrist < 0:
         print("--wrist는 0 이상")
+        return 1
+    if args.bin_weight < 0:
+        print("--bin-weight는 0 이상")
         return 1
     wide = slice(dataset.BINS.start - args.shift, dataset.BINS.stop + args.shift)
     ds, lines = dataset.build(args.data, args.sessions, bins=wide, standardized=args.shift == 0, gt=args.gt, row_norm=args.row_norm,
@@ -730,7 +795,7 @@ def main():
     mode = args.mode or ("session" if len(ds["sessions"]) >= 2 else "blocks")
     if not args.mode:
         print(f"나누기 {mode}(--mode 없음: 세션 {len(ds['sessions'])}개 — 둘 이상이면 session, 하나면 blocks)")
-    run = args.run or f"{time.strftime('%Y%m%d-%H%M%S')}-{mode}{'' if args.gt == 'mediapipe' else '-' + args.gt}{'-rownorm' if args.row_norm else ''}{'' if args.channels == 'base' else '-' + args.channels}"
+    run = args.run or f"{time.strftime('%Y%m%d-%H%M%S')}-{mode}{'' if args.gt == 'mediapipe' else '-' + args.gt}{'-rownorm' if args.row_norm else ''}{'' if args.channels == 'base' else '-' + args.channels}{'' if args.head == 'coords' else '-' + args.head}"
     folder = os.path.join(args.out or os.path.join(args.data, "processed", "training"), run)
     try:
         parts, block, split, what, lines = split_frames(ds, mode, args)
@@ -769,10 +834,18 @@ def main():
     if args.wrist > 0:  # 손가락 60 · u 3 · 깊이 축 3 · ok 1(loss_fn)
         target = np.concatenate([ds["y"], ds["wrist"], ds["wrist_depth"], ds["wrist_ok"][:, None].astype(np.float32)], axis=1)
     y = torch.as_tensor(target, device=device)
+    template, angles = None, None
+    if args.head != "coords":
+        template = kinematics.fit_template(ds["y"][train].reshape(-1, 20, 3), bins=HEAD_BINS if args.head == "bins" else 0)
+        if args.head == "bins":
+            angles = torch.as_tensor(kinematics.ik(ds["y"].reshape(-1, 20, 3)).reshape(n, kinematics.ANGLES), dtype=torch.float32, device=device)
+        print(f"관절 각도 머리 {args.head}: 손바닥 점 다섯·뼈 15개 길이를 학습 {len(train)}프레임에서 고정"
+              + (f", 각도마다 {HEAD_BINS}칸(칸 손실 무게 {args.bin_weight:g})" if args.head == "bins" else ""))
     start = time.time()
     try:
         model, history, best_epoch, stopped = fit(x, y, segments(ds["frame_ns"], ds["session"], train), segments(ds["frame_ns"], ds["session"], val),
-                                                  args.epochs, args.seed, max_minutes=args.max_minutes, augment=augment, wrist_weight=args.wrist)
+                                                  args.epochs, args.seed, max_minutes=args.max_minutes, augment=augment, wrist_weight=args.wrist,
+                                                  head=args.head, template=template, angles=angles, bin_weight=args.bin_weight)
     except FloatingPointError as e:
         print(f"학습을 멈춤: {e}")
         return 1
@@ -791,11 +864,15 @@ def main():
               "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu", "history": history, "mix": mix, "split": split,
               "augment": {"shift": args.shift, "mask": args.mask, "fraction": AUG_FRACTION, "maskProb": MASK_PROB, "maskRows": list(MASK_ROWS),
                           "maskBins": list(MASK_BINS)} if augment else None})
+    hm = head_metrics(ds, pred, train, test, template)
+    m["angles"] = hm["angles"]
+    m["head"] = {"type": args.head, "bins": HEAD_BINS if args.head == "bins" else 0, "binWeight": args.bin_weight if args.head == "bins" else 0.0,
+                 "ceilingMm": hm.get("ceilingMm")}
     if args.wrist > 0:
         m["wrist"] = {"weight": args.wrist, "depthWeight": DEPTH_WEIGHT, **wrist_metrics(ds, out[:, FINGER_OUT:FINGER_OUT + WRIST_OUT], train, test)}
     torch.save({"arch": ARCH, "in_chans": int(x.shape[1]), "channels": args.channels, "num_classes": int(model.num_classes), "bins": [dataset.BINS.start, dataset.BINS.stop],
                 "window": dataset.WINDOW, "mode": mode, "seed": args.seed, "epoch": best_epoch, "sessions": ds["sessions"].tolist(), "wrist": args.wrist,
-                "gt": args.gt, "row_norm": args.row_norm,
+                "gt": args.gt, "row_norm": args.row_norm, "head": args.head, "head_bins": HEAD_BINS if args.head == "bins" else 0,
                 "state_dict": model.state_dict()},
                os.path.join(folder, "model.pt"))
     hs_io.write_json(os.path.join(folder, "metrics.json"), m)
