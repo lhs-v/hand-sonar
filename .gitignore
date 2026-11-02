@@ -36,6 +36,8 @@ mobile/src/main/assets/hand_landmarker.task
 # 예외: data/의 데이터 묶음(export_data.py — 에코 프로파일만, 영상·원본 소리 없음)
 !data/sessions/*/echo.npz
 !data/recordings/*/echo.npz
+# 예외: 송신 신호 비교 문서의 그림(tools/experiments/sonar_signals.py·hand_echo_sim.py가 그린 것, 영상·얼굴 없음)
+!docs/sonar-signal/*.png
 
 # 학습한 모델도 저장소 밖 hand-sonar-data/processed/training에 둔다
 *.pt
