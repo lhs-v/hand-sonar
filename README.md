@@ -11,7 +11,7 @@
 | `wear/` | 워치 앱. 18–21 kHz 처프(600 샘플, 48 kHz)를 계속 내면서 마이크를 녹음합니다. 1분 조각 WAV와 기록(`rec.json`), 가속도·자이로·지자기·중력 기록(`sensors-NNN.csv`)을 남기고, 녹음이 멈추면 블루투스로 폰에 넘깁니다. |
 | `mobile/` | 폰 앱. 정면 카메라와 MediaPipe Hand Landmarker로 손 관절 21점을 프레임마다 적고(`landmarks.csv`), 같은 프레임을 영상(`video.mp4`)으로 남깁니다. 안내 동작(손가락 굽히기, ASL 숫자, 손목, 자유 동작)을 시간표대로 띄우고(`prompts.csv`), 세션 시작과 끝에 표지음을 냅니다. 폰 센서(`phone_sensors-NNN.csv`)와 세션 정보도 적습니다. 워치가 넘긴 녹음을 받아 두고, 기록 화면에서 zip으로 내보냅니다. |
 | `shared/` | 두 앱이 같이 쓰는 순수 Kotlin 코드입니다(처프·표지음 규격, 검출기, 파일 형식, 세션 진행). JVM 시험이 있습니다. |
-| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`, 잠재 상태를 넘기는 순서 모델 `train_seq.py`), 학습 결과 영상(`render_video.py`·`render_draw.py`·`hand_seg.py`·`mano.py`), 데이터 묶음 만들기·되돌리기(`export_data.py`·`unpack_data.py`). 실험 스크립트(`experiments/`: 공개 데이터를 우리 형식으로, 공개 모델 전이, 학습 방법 바꾸기)도 있습니다. |
+| `tools/` | PC용 파이썬 도구입니다. 받기(`pull.py`), 녹음 점검(`check_recording.py`), 센서·볼륨·세션 정보 점검(`check_sensors.py`), 표지음으로 시간 맞춤(`align.py`), 에코 프로파일(`profiles.py`), 카메라와 맞춤 검증(`verify_sync.py`), 카메라 프레임↔프로파일 줄 대응표(`pairs.py`), 세션 신호 잣대(`signal_check.py`), 공개 데이터와 나란히 보기(`compare.py`), 손 관절 학습(`joints.py`·`dataset.py`·`train.py`, 잠재 상태를 넘기는 순서 모델 `train_seq.py`), 학습 결과 영상(`render_video.py`·`render_draw.py`·`hand_seg.py`·`mano.py`), 데이터 묶음 만들기·되돌리기(`export_data.py`·`unpack_data.py`). 실험 스크립트(`experiments/`: 공개 데이터를 우리 형식으로, 공개 모델 전이, 학습 방법 바꾸기, 송신 신호 비교·손 메아리 시뮬레이션)도 있습니다. |
 | `data/` | 모은 세션 10개의 손 관절과 에코 프로파일, 그것을 맞추는 기록(영상·원본 소리·센서 제외, [data/README.md](data/README.md)). |
 
 ## 두 기기 시간 맞추기
@@ -74,6 +74,7 @@
   - 공개 데이터와 처프가 달라 미리 학습하거나 견주기 어렵고, 톱니 세션과 섞어 학습하기도 어렵습니다.
   - 2026-10-31 같은 착용에서 두 세션씩 견주니 톱니가 더 잘 배웠습니다(블록 학습 평균 자세 대비 비 평균 0.856 대 삼각 1.011, 씨앗값 3개 모두). 수집은 톱니를 씁니다.
   - 삼각을 오름 반·내림 반으로 나눠 따로 상관하는 시험 처리가 있습니다(`profiles.py --split`, `train.py --channels split|all`). 세 삼각 세션 블록 학습에서 평균 자세 대비 비가 2채널 0.964, 4채널 0.980, 6채널 0.953(씨앗값 3개 평균)으로 나아지지 않았습니다. 실제 손가락 움직임에서 오름·내림 어긋남은 1칸 안팎이었습니다.
+- **신호 비교**(2026-11-02, [docs/sonar-signal.md](docs/sonar-signal.md)): 같은 3 kHz 대역에서는 처프 대신 부호 신호(Zadoff–Chu·PN·OFDM)를 써도 거리 응답이 같습니다. 창·모양을 견주면 수집은 톱니 + Tukey(60)가 가장 낫습니다. 딸깍은 −76 dB로 삼각(−74 dB)과 같은 수준이고, 한 주기 바닥은 삼각의 약 1/90, 에너지는 87%입니다. hann은 직접 경로가 17 cm까지 번집니다. 실측에 맞춘 손 메아리 시뮬레이션에서는 hann 말고는 신호 사이 차이가 0.2 mm 안이었습니다.
 - **녹음 음원**(UNPROCESSED · 음성 인식 · 자동): 처음 값은 UNPROCESSED입니다. WatchHand는 워치에서 UNPROCESSED로 녹음했습니다(§3.2).
   - 워치8은 UNPROCESSED 지원을 선언하지 않아 "자동"이면 음성 인식(VOICE_RECOGNITION)이 됩니다.
   - UNPROCESSED가 열리지 않으면 음성 인식으로 녹음하고, 시작 때 오류 진동과 화면 한 줄로 알립니다.
