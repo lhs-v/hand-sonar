@@ -38,6 +38,8 @@ mobile/src/main/assets/hand_landmarker.task
 !data/recordings/*/echo.npz
 # 예외: 송신 신호 비교 문서의 그림(tools/experiments/sonar_signals.py·hand_echo_sim.py가 그린 것, 영상·얼굴 없음)
 !docs/sonar-signal/*.png
+# 예외: 에코 프로파일 문서의 그림(tools/experiments/echo_geometry.py·echo_hand_shape.py·second_arrival.py가 그린 것, 영상·얼굴 없음)
+!docs/echo-profile/*.png
 
 # 학습한 모델도 저장소 밖 hand-sonar-data/processed/training에 둔다
 *.pt
