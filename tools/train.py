@@ -2,7 +2,7 @@
 
     python -I tools/train.py [--mode session|blocks|time|overfit] [--run 이름] [--data 데이터 폴더] [--out 학습 결과 폴더] [--epochs 100]
                              [--max-minutes 20] [--seed 0] [--offset 0] [--test 세션 …] [--val 세션 …] [--shift 5] [--mask] [--wrist 0.1]
-                             [--gt mediapipe|hamer] [--row-norm] [--channels base|split|all] [--head coords|angles|bins] [--bin-weight 0.01]
+                             [--gt mediapipe|hamer] [--row-norm] [--channels base|split|all] [--head coords|angles|bins] [--bin-weight 0.01] [--coord-weight 1]
                              [--save-x] [세션 …]
 
 - 자료: dataset.build(설계 §2·§3). 결과는 <out>/<run>/(기본 <data>/processed/training/<run>/)에 dataset.npz·model.pt·metrics.json·
@@ -34,7 +34,7 @@
 - 관절 각도 머리(--head, 2026-11-01): coords(기본, 점 60값 직접 회귀 — 논문과 같음), angles(뼈 15개의 굽힘·벌림 30값을 회귀해 순기구학),
   bins(같은 30각을 각도마다 HEAD_BINS칸으로 분류하고 칸 확률의 기댓값으로 순기구학). 손바닥 점 다섯과 뼈 길이는 학습 프레임에서 정해
   고정한다(kinematics 머리말). 손실은 순기구학한 점에 그대로 MSE + 속도 손실이고, bins는 학습 손실에만 --bin-weight × 칸 교차 엔트로피
-  (정답 각도에 씌운 가우스 칸 분포)를 더한다. 검증 손실과 조기 종료는 점 손실만 본다. 시험 정답을 각도로 바꿨다 되돌린 오차를 표현
+  (정답 각도에 씌운 가우스 칸 분포)를 더한다. --coord-weight 0이면 칸 교차 엔트로피만으로 학습한다. 검증 손실과 조기 종료는 언제나 점 손실만 본다. 시험 정답을 각도로 바꿨다 되돌린 오차를 표현
   한계(metrics.json head ceilingMm)로 남긴다. HaMeR 정답은 0.26 mm, MediaPipe 정답은 4.16 mm였다(손바닥·뼈가 프레임마다 흔들림).
   관절 각 오차(뼈 15개 굽힘·벌림 차의 절댓값 평균, 도)는 머리와 상관없이 모델과 평균 자세 둘 다 metrics.json angles에 남긴다.
 - 최적화: Adam 1e-3. 검증 손실(같은 손실, 평가 모드)이 9 epoch 동안 나아지지 않으면 멈추고 가장 좋던 가중치로 되돌린다. 최대 --epochs
@@ -150,6 +150,12 @@ def bin_term(model, angles, weight):
     if weight <= 0 or not isinstance(model, kinematics.Head) or not model.bins:
         return torch.zeros((), device=angles.device)
     return weight * kinematics.bin_loss(model.logits, angles, model.centers)
+
+
+def train_loss(model, pred, true, pair, angles=None, wrist_weight=0.0, bin_weight=0.0, coord_weight=1.0):
+    """학습 손실: coord_weight × loss_fn(좌표 MSE + 속도 + 손목) + bin_term(angles가 있을 때). 검증 손실(eval_loss)은 늘 loss_fn만 본다."""
+    loss = coord_weight * loss_fn(pred, true, pair, wrist_weight)
+    return loss if angles is None else loss + bin_term(model, angles, bin_weight)
 
 
 def segments(t_ns, session, index, gap_sec=CHUNK_GAP_SEC):
@@ -291,11 +297,12 @@ def eval_loss(model, x, y, segs, wrist_weight=0.0):
 
 
 def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MINUTES, augment=None, wrist_weight=0.0, head="coords",
-        template=None, angles=None, bin_weight=0.0):
+        template=None, angles=None, bin_weight=0.0, coord_weight=1.0):
     """(가장 좋던 가중치의 모델, 기록, 가장 좋던 epoch, 멈춘 까닭 "patience" | "epochs" | "time"). x (N, 2, 96, 60)·y (N, 60)는 같은 장치의
     텐서. 학습·검증 손실이 유한하지 않으면(nan·inf) 그 자리에서 이유를 담은 FloatingPointError로 멈춘다. augment(Augment)를 주면 학습
     미니배치만 그것으로 만들고 검증은 x 그대로다. wrist_weight > 0이면 y는 (N, 67)(loss_fn)이고 모델 출력은 63값이다. head·template은
-    make_model로 넘기고, angles (N, 30)(정답 관절 각도)와 bin_weight > 0이면 학습 손실에 bin_term을 더한다(검증 손실에는 넣지 않는다)."""
+    make_model로 넘기고, angles (N, 30)(정답 관절 각도)와 bin_weight > 0이면 학습 손실에 bin_term을 더한다(검증 손실에는 넣지 않는다).
+    coord_weight는 학습 손실의 좌표 항 무게다(train_loss). 0이면 칸 교차 엔트로피만으로 학습하고, 검증·조기 종료는 그대로 좌표 손실을 본다."""
     torch.manual_seed(seed)
     model = make_model(FINGER_OUT + (WRIST_OUT if wrist_weight > 0 else 0), in_chans=int(x.shape[1]), head=head, template=template).to(x.device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
@@ -308,9 +315,8 @@ def fit(x, y, train_segs, val_segs, epochs, seed, log=print, max_minutes=MAX_MIN
         for idx, pair, lengths in batch_pieces(train_segs, rng):
             i = torch.as_tensor(idx, device=x.device)
             inputs = x[i] if augment is None else augment.batch(i, lengths, rng)
-            loss = loss_fn(model(inputs), y[i], torch.as_tensor(pair, device=x.device), wrist_weight)
-            if angles is not None:
-                loss = loss + bin_term(model, angles[i], bin_weight)
+            loss = train_loss(model, model(inputs), y[i], torch.as_tensor(pair, device=x.device), None if angles is None else angles[i],
+                              wrist_weight, bin_weight, coord_weight)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -781,6 +787,8 @@ def main():
     parser.add_argument("--head", choices=HEADS, default="coords",
                         help="출력: coords(점 60값 회귀, 기본), angles(관절 각도 30값 회귀 + 순기구학), bins(각도 칸 분류 + 순기구학). 손바닥·뼈 길이는 학습 프레임으로 고정")
     parser.add_argument("--bin-weight", type=float, default=BIN_WEIGHT, metavar="무게", help=f"--head bins의 칸 교차 엔트로피 무게(기본 {BIN_WEIGHT:g})")
+    parser.add_argument("--coord-weight", type=float, default=1.0, metavar="무게",
+                        help="학습 손실의 좌표 MSE + 속도 손실 무게(기본 1). 0이면 --head bins의 칸 교차 엔트로피만으로 학습한다(검증·조기 종료는 좌표 손실 그대로)")
     parser.add_argument("--save-x", action="store_true", help="dataset.npz에 창 x도 쓴다(세션당 약 170 MB. 기본은 row·목표·라벨·입력 지문만)")
     args = parser.parse_args()
     if not 0 <= args.shift <= dataset.BINS.start:
@@ -791,6 +799,12 @@ def main():
         return 1
     if args.bin_weight < 0:
         print("--bin-weight는 0 이상")
+        return 1
+    if args.coord_weight < 0:
+        print("--coord-weight는 0 이상")
+        return 1
+    if args.coord_weight == 0 and (args.head != "bins" or args.bin_weight == 0):
+        print("--coord-weight 0은 칸 교차 엔트로피로만 학습하므로 --head bins와 0보다 큰 --bin-weight가 필요함")
         return 1
     wide = slice(dataset.BINS.start - args.shift, dataset.BINS.stop + args.shift)
     ds, lines = dataset.build(args.data, args.sessions, bins=wide, standardized=args.shift == 0, gt=args.gt, row_norm=args.row_norm,
@@ -853,7 +867,7 @@ def main():
     try:
         model, history, best_epoch, stopped = fit(x, y, segments(ds["frame_ns"], ds["session"], train), segments(ds["frame_ns"], ds["session"], val),
                                                   args.epochs, args.seed, max_minutes=args.max_minutes, augment=augment, wrist_weight=args.wrist,
-                                                  head=args.head, template=template, angles=angles, bin_weight=args.bin_weight)
+                                                  head=args.head, template=template, angles=angles, bin_weight=args.bin_weight, coord_weight=args.coord_weight)
     except FloatingPointError as e:
         print(f"학습을 멈춤: {e}")
         return 1
@@ -874,7 +888,7 @@ def main():
                           "maskBins": list(MASK_BINS)} if augment else None})
     hm = head_metrics(ds, pred, train, test, template)
     m["angles"] = hm["angles"]
-    m["head"] = {"type": args.head, "bins": HEAD_BINS if args.head == "bins" else 0, "binWeight": args.bin_weight if args.head == "bins" else 0.0,
+    m["head"] = {"type": args.head, "bins": HEAD_BINS if args.head == "bins" else 0, "binWeight": args.bin_weight if args.head == "bins" else 0.0, "coordWeight": args.coord_weight,
                  "ceilingMm": hm.get("ceilingMm")}
     if args.wrist > 0:
         m["wrist"] = {"weight": args.wrist, "depthWeight": DEPTH_WEIGHT, **wrist_metrics(ds, out[:, FINGER_OUT:FINGER_OUT + WRIST_OUT], train, test)}

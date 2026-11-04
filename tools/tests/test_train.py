@@ -235,6 +235,29 @@ class KinematicHeadTest(unittest.TestCase):
             term = float(train.bin_term(model, angles, 0.5))
             self.assertEqual(positive, term > 0, head)
 
+    def test_train_loss_weights_coords_and_bins(self):
+        y = kinematic_targets(39, n=4)
+        model = train.make_model(train.FINGER_OUT, head="bins", template=kinematics.fit_template(kinematic_targets(40), bins=8))
+        target = torch.as_tensor(y.reshape(4, 60), dtype=torch.float32)
+        angles = torch.as_tensor(kinematics.ik(y).reshape(4, 30), dtype=torch.float32)
+        pair = torch.ones(3, dtype=torch.bool)
+        pred = model(torch.zeros(4, 2, 96, 60))
+        coords, bins = float(train.loss_fn(pred, target, pair)), float(train.bin_term(model, angles, 0.5))
+        self.assertAlmostEqual(coords + bins, float(train.train_loss(model, pred, target, pair, angles, bin_weight=0.5)), places=5)
+        self.assertAlmostEqual(bins, float(train.train_loss(model, pred, target, pair, angles, bin_weight=0.5, coord_weight=0.0)), places=5)
+        self.assertAlmostEqual(coords, float(train.train_loss(model, pred, target, pair, None, bin_weight=0.5)), places=5)
+
+    def test_fit_on_the_bin_loss_alone_still_validates_on_coordinates(self):
+        y = kinematic_targets(41, n=8)
+        x = torch.as_tensor(np.random.default_rng(42).normal(size=(8, 2, 96, 60)).astype(np.float32))
+        target = torch.as_tensor(y.reshape(8, 60), dtype=torch.float32)
+        angles = torch.as_tensor(kinematics.ik(y).reshape(8, 30), dtype=torch.float32)
+        segs = [np.arange(8)]
+        model, history, _, _ = train.fit(x, target, segs, segs, epochs=1, seed=0, log=lambda line: None, head="bins",
+                                         template=kinematics.fit_template(y, bins=8), angles=angles, bin_weight=0.1, coord_weight=0.0)
+        self.assertAlmostEqual(train.eval_loss(model, x, target, segs), history[0]["val"], places=5)
+        self.assertGreater(history[0]["train"], 0.1 * 1.0)  # 칸 8개의 교차 엔트로피(처음 약 ln 8)만으로 된 손실
+
     def test_fit_trains_a_bins_head(self):
         y = kinematic_targets(36, n=8)
         t = kinematics.fit_template(y, bins=8)
